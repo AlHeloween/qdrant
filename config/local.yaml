@@ -1,0 +1,47 @@
+# Local overrides (not tracked in upstream Qdrant installs) aimed at:
+# - localhost-only dev server
+# - faster bulk indexing of large codebases (embeddings) with reasonable query performance
+
+service:
+  # Bind only to loopback so it isn't reachable from LAN.
+  host: 127.0.0.1
+  enable_cors: false
+
+  # Allow larger batch upserts (vectors + payload).
+  # Raise further if you hit HTTP 413 (Payload Too Large).
+  max_request_size_mb: 128
+
+storage:
+  # Fewer, larger WAL segments reduces overhead during heavy ingest.
+  wal:
+    wal_capacity_mb: 256
+    wal_segments_ahead: 1
+
+  performance:
+    # Keep 1 CPU thread free for the OS/editor while optimizers/index builders run.
+    optimizer_cpu_budget: -1
+
+  optimizers:
+    # Delay HNSW build while you're ingesting lots of points (faster writes).
+    # After ingest, you can lower this (e.g. 50_000 or 100_000) for more aggressive indexing.
+    indexing_threshold_kb: 300000
+
+    # Limit background optimizations so ingestion doesn't get CPU-starved.
+    max_optimization_threads: 2
+
+  hnsw_index:
+    # Use a bounded number of threads for index build (more stable on Windows).
+    max_indexing_threads: 8
+
+    # Keep HNSW index on disk by default to avoid huge RAM usage on big projects.
+    # Set to false if you have plenty of RAM and want faster queries.
+    on_disk: true
+
+  collection:
+    vectors:
+      # Store vectors on disk by default (good for large codebases).
+      on_disk: true
+
+# Also disabled by `_run.cmd` via CLI flag, but keep it off by default too.
+telemetry_disabled: true
+
