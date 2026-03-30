@@ -4,8 +4,7 @@ use std::path::PathBuf;
 #[cfg(feature = "rocksdb")]
 use std::sync::Arc;
 
-use bitvec::vec::BitVec;
-use common::ext::BitSliceExt as _;
+use common::bitvec::{BitSliceExt as _, BitVec};
 use common::types::PointOffsetType;
 use gridstore::Blob;
 #[cfg(feature = "rocksdb")]
@@ -24,10 +23,10 @@ use crate::common::rocksdb_buffered_delete_wrapper::DatabaseColumnScheduledDelet
 use crate::common::rocksdb_wrapper::DatabaseColumnWrapper;
 use crate::index::field_index::histogram::{Histogram, Numericable, Point};
 use crate::index::field_index::immutable_point_to_values::ImmutablePointToValues;
-use crate::index::field_index::mmap_point_to_values::MmapValue;
+use crate::index::field_index::stored_point_to_values::StoredValue;
 use crate::index::payload_config::StorageType;
 
-pub struct ImmutableNumericIndex<T: Encodable + Numericable + MmapValue + Default> {
+pub struct ImmutableNumericIndex<T: Encodable + Numericable + StoredValue + Default> {
     map: NumericKeySortedVec<T>,
     histogram: Histogram<T>,
     points_count: usize,
@@ -37,7 +36,7 @@ pub struct ImmutableNumericIndex<T: Encodable + Numericable + MmapValue + Defaul
     storage: Storage<T>,
 }
 
-enum Storage<T: Encodable + Numericable + MmapValue + Default> {
+enum Storage<T: Encodable + Numericable + StoredValue + Default> {
     #[cfg(feature = "rocksdb")]
     RocksDb(DatabaseColumnScheduledDeleteWrapper),
     Mmap(Box<MmapNumericIndex<T>>),
@@ -157,7 +156,7 @@ impl<T: Encodable + Numericable> DoubleEndedIterator for NumericKeySortedVecIter
     }
 }
 
-impl<T: Encodable + Numericable + MmapValue + Send + Sync + Default> ImmutableNumericIndex<T>
+impl<T: Encodable + Numericable + StoredValue + Send + Sync + Default> ImmutableNumericIndex<T>
 where
     Vec<T>: Blob,
 {

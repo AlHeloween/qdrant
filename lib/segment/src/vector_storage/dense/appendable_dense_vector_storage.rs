@@ -3,10 +3,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use bitvec::prelude::BitSlice;
+use common::bitvec::BitSlice;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::generic_consts::AccessPattern;
 use common::mmap::AdviceSetting;
 use common::types::PointOffsetType;
+use common::universal_io::MmapFile;
 use fs_err as fs;
 
 use crate::common::Flusher;
@@ -17,9 +19,9 @@ use crate::data_types::named_vectors::CowVector;
 use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{VectorElementType, VectorRef};
 use crate::types::{Distance, VectorStorageDatatype};
-use crate::vector_storage::chunked_mmap_vectors::ChunkedMmapVectors;
+use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::{
-    AccessPattern, DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 const VECTORS_DIR_PATH: &str = "vectors";
@@ -27,7 +29,7 @@ const DELETED_DIR_PATH: &str = "deleted";
 
 #[derive(Debug)]
 pub struct AppendableMmapDenseVectorStorage<T: PrimitiveVectorElement> {
-    vectors: ChunkedMmapVectors<T>,
+    vectors: ChunkedVectors<T, MmapFile>,
     /// Flags marking deleted vectors
     ///
     /// Structure grows dynamically, but may be smaller than actual number of vectors. Must not
@@ -80,7 +82,7 @@ impl<T: PrimitiveVectorElement> DenseVectorStorage<T> for AppendableMmapDenseVec
         self.vectors.dim()
     }
 
-    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> &[T] {
+    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> Cow<'_, [T]> {
         self.vectors
             .get::<P>(key as VectorOffsetType)
             .expect("mmap vector not found")
@@ -111,14 +113,14 @@ impl<T: PrimitiveVectorElement> VectorStorage for AppendableMmapDenseVectorStora
     fn get_vector<P: AccessPattern>(&self, key: PointOffsetType) -> CowVector<'_> {
         self.vectors
             .get::<P>(key as VectorOffsetType)
-            .map(|slice| CowVector::from(T::slice_to_float_cow(slice.into())))
+            .map(|slice| CowVector::from(T::slice_to_float_cow(slice)))
             .expect("Vector not found")
     }
 
     fn get_vector_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<CowVector<'_>> {
         self.vectors
             .get::<P>(key as VectorOffsetType)
-            .map(|slice| CowVector::from(T::slice_to_float_cow(slice.into())))
+            .map(|slice| CowVector::from(T::slice_to_float_cow(slice)))
     }
 
     fn insert_vector(
@@ -248,7 +250,7 @@ pub fn open_appendable_memmap_vector_storage_impl<T: PrimitiveVectorElement>(
     let vectors_path = path.join(VECTORS_DIR_PATH);
     let deleted_path = path.join(DELETED_DIR_PATH);
 
-    let vectors = ChunkedMmapVectors::<T>::open(&vectors_path, dim, madvise, Some(populate))?;
+    let vectors = ChunkedVectors::open(&vectors_path, dim, madvise, Some(populate))?;
 
     let deleted = BitvecFlags::new(DynamicMmapFlags::open(&deleted_path, populate)?);
     let deleted_count = deleted.count_trues();
@@ -279,7 +281,7 @@ mod tests {
     use std::collections::HashSet;
 
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use tempfile::Builder;
 
     use super::*;

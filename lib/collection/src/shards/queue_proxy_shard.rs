@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::tar_ext;
-use common::types::TelemetryDetail;
+use common::types::{DeferredBehavior, TelemetryDetail};
 use parking_lot::Mutex as ParkingMutex;
 use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::index::field_index::CardinalityEstimation;
@@ -36,7 +36,7 @@ use crate::operations::types::{
 };
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::shards::local_shard::LocalShard;
-use crate::shards::shard_trait::ShardOperation;
+use crate::shards::shard_trait::{ShardOperation, WaitUntil};
 use crate::shards::telemetry::LocalShardTelemetry;
 
 /// Number of operations in batch when syncing
@@ -295,7 +295,7 @@ impl ShardOperation for QueueProxyShard {
     async fn update(
         &self,
         operation: OperationWithClockTag,
-        wait: bool,
+        wait: WaitUntil,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<UpdateResult> {
@@ -329,6 +329,7 @@ impl ShardOperation for QueueProxyShard {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<Vec<RecordInternal>> {
         self.inner_unchecked()
             .local_scroll_by_id(
@@ -340,6 +341,7 @@ impl ShardOperation for QueueProxyShard {
                 search_runtime_handle,
                 timeout,
                 hw_measurement_acc,
+                deferred_behavior,
             )
             .await
     }
@@ -367,9 +369,16 @@ impl ShardOperation for QueueProxyShard {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<CountResult> {
         self.inner_unchecked()
-            .count(request, search_runtime_handle, timeout, hw_measurement_acc)
+            .count(
+                request,
+                search_runtime_handle,
+                timeout,
+                hw_measurement_acc,
+                deferred_behavior,
+            )
             .await
     }
 
@@ -382,6 +391,7 @@ impl ShardOperation for QueueProxyShard {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<Vec<RecordInternal>> {
         self.inner_unchecked()
             .retrieve(
@@ -391,6 +401,7 @@ impl ShardOperation for QueueProxyShard {
                 search_runtime_handle,
                 timeout,
                 hw_measurement_acc,
+                deferred_behavior,
             )
             .await
     }
@@ -549,7 +560,15 @@ impl Inner {
             let wal = self.wrapped_shard.wal.wal.lock().await;
             let items_left = (wal.last_index() + 1).saturating_sub(transfer_from);
             let items_total = (transfer_from - self.started_at) + items_left;
-            let batch = wal.read(transfer_from).take(BATCH_SIZE).collect::<Vec<_>>();
+            let batch = wal
+                .read(transfer_from)
+                .take(BATCH_SIZE)
+                .collect::<shard::wal::Result<Vec<_>>>()
+                .map_err(|e| {
+                    CollectionError::service_error(format!(
+                        "Failed to read WAL during queue proxy transfer: {e}"
+                    ))
+                })?;
             debug_assert!(
                 batch.len() <= items_left as usize,
                 "batch cannot be larger than items_left",
@@ -571,12 +590,18 @@ impl Inner {
             drop(update_lock.take());
         }
 
-        // If we are transferring the last batch, we need to wait for it to be applied.
+        // If we are transferring the last batch, we need to wait for it to be written to a segment.
         //  - Why can we not wait? Assuming that order of operations is still enforced by the WAL,
         //    we should end up in exactly the same state with or without waiting.
         //  - Why do we need to wait on the last batch? If we switch to ready state before
         //    updates are actually applied, we might create an inconsistency for read operations.
-        let wait = last_batch;
+        //  - Why Segment and not Visible? We only need the data to be written, not necessarily
+        //    visible through deferred indexing. Waiting for full visibility would be unnecessarily slow.
+        let wait = if last_batch {
+            WaitUntil::Segment
+        } else {
+            WaitUntil::Wal
+        };
 
         // Set initial progress on the first batch
         let is_first = transfer_from == self.started_at;
@@ -637,7 +662,7 @@ impl ShardOperation for Inner {
     async fn update(
         &self,
         operation: OperationWithClockTag,
-        wait: bool,
+        wait: WaitUntil,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<UpdateResult> {
@@ -677,6 +702,7 @@ impl ShardOperation for Inner {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<Vec<RecordInternal>> {
         let local_shard = &self.wrapped_shard;
         local_shard
@@ -689,6 +715,7 @@ impl ShardOperation for Inner {
                 search_runtime_handle,
                 timeout,
                 hw_measurement_acc,
+                deferred_behavior,
             )
             .await
     }
@@ -720,10 +747,17 @@ impl ShardOperation for Inner {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<CountResult> {
         let local_shard = &self.wrapped_shard;
         local_shard
-            .count(request, search_runtime_handle, timeout, hw_measurement_acc)
+            .count(
+                request,
+                search_runtime_handle,
+                timeout,
+                hw_measurement_acc,
+                deferred_behavior,
+            )
             .await
     }
 
@@ -736,6 +770,7 @@ impl ShardOperation for Inner {
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
         hw_measurement_acc: HwMeasurementAcc,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<Vec<RecordInternal>> {
         let local_shard = &self.wrapped_shard;
         local_shard
@@ -746,6 +781,7 @@ impl ShardOperation for Inner {
                 search_runtime_handle,
                 timeout,
                 hw_measurement_acc,
+                deferred_behavior,
             )
             .await
     }
@@ -792,7 +828,7 @@ impl ShardOperation for Inner {
 async fn transfer_operations_batch(
     batch: &[(u64, OperationWithClockTag)],
     remote_shard: &RemoteShard,
-    wait: bool,
+    wait: WaitUntil,
     timeout: Option<Duration>,
     hw_measurement_acc: HwMeasurementAcc,
 ) -> CollectionResult<()> {

@@ -322,6 +322,15 @@
             }
           },
           {
+            "name": "per_collection",
+            "in": "query",
+            "description": "If true, include per-collection request statistics in the response",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "timeout",
             "in": "query",
             "description": "Timeout for this request",
@@ -406,6 +415,15 @@
             "name": "anonymize",
             "in": "query",
             "description": "If true, anonymize result",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "per_collection",
+            "in": "query",
+            "description": "If true, include per-collection request metrics with a collection label instead of global request metrics",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -1475,6 +1493,16 @@
             "schema": {
               "$ref": "#/components/schemas/WriteOrdering"
             }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "description": "Timeout for the operation",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         ],
         "requestBody": {
@@ -1669,6 +1697,16 @@
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/WriteOrdering"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "description": "Timeout for the operation",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         ],
@@ -7613,13 +7651,12 @@
         "type": "object",
         "required": [
           "default_segment_number",
-          "deleted_threshold",
-          "flush_interval_sec",
-          "vacuum_min_vector_number"
+          "flush_interval_sec"
         ],
         "properties": {
           "deleted_threshold": {
             "description": "The minimal fraction of deleted vectors in a segment, required to perform segment optimization",
+            "default": 0.2,
             "type": "number",
             "format": "double",
             "maximum": 1,
@@ -7627,6 +7664,7 @@
           },
           "vacuum_min_vector_number": {
             "description": "The minimal number of vectors in a segment, required to perform segment optimization",
+            "default": 1000,
             "type": "integer",
             "format": "uint",
             "minimum": 100
@@ -7764,6 +7802,13 @@
           },
           "upsert_max_batchsize": {
             "description": "Max batchsize when upserting",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
+          },
+          "search_max_batchsize": {
+            "description": "Max batchsize when searching",
             "type": "integer",
             "format": "uint",
             "minimum": 0,
@@ -8412,6 +8457,13 @@
             "type": "integer",
             "format": "uint",
             "minimum": 0
+          },
+          "deferred_points": {
+            "description": "Number of points that are deferred (i.e hidden from search as they're not yet optimized).",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
           }
         }
       },
@@ -9590,7 +9642,7 @@
             "nullable": true
           },
           "oversampling": {
-            "description": "Oversampling factor for quantization. Default is 1.0.\n\nDefines how many extra vectors should be pre-selected using quantized index, and then re-scored using original vectors.\n\nFor example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will be pre-selected using quantized index, and then top-100 will be returned after re-scoring.",
+            "description": "Oversampling factor for quantization. Default is 1.0.\n\nDefines how many extra vectors should be preselected using quantized index, and then re-scored using original vectors.\n\nFor example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will be preselected using quantized index, and then top-100 will be returned after re-scoring.",
             "type": "number",
             "format": "double",
             "minimum": 1,
@@ -10401,6 +10453,13 @@
           },
           "upsert_max_batchsize": {
             "description": "Max batchsize when upserting",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
+          },
+          "search_max_batchsize": {
+            "description": "Max batchsize when searching",
             "type": "integer",
             "format": "uint",
             "minimum": 0,
@@ -12758,6 +12817,18 @@
             "format": "uint",
             "minimum": 0
           },
+          "num_deferred_points": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
+          },
+          "num_deleted_deferred_points": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
+          },
           "num_indexed_vectors": {
             "type": "integer",
             "format": "uint",
@@ -12804,6 +12875,13 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/VectorDataInfo"
             }
+          },
+          "deferred_internal_id": {
+            "description": "Internal ID from which points are deferred (hidden from reads). Only set for appendable segments.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "nullable": true
           }
         }
       },
@@ -13439,6 +13517,13 @@
             "format": "uint",
             "minimum": 0,
             "nullable": true
+          },
+          "deferred_points": {
+            "description": "Number of points that are deferred (i.e hidden from search as they're not yet optimized).",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "nullable": true
           }
         }
       },
@@ -13824,6 +13909,18 @@
                 "$ref": "#/components/schemas/OperationDurationStatistics"
               }
             }
+          },
+          "per_collection_responses": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/OperationDurationStatistics"
+                }
+              }
+            }
           }
         }
       },
@@ -13839,6 +13936,18 @@
               "type": "object",
               "additionalProperties": {
                 "$ref": "#/components/schemas/OperationDurationStatistics"
+              }
+            }
+          },
+          "per_collection_responses": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/OperationDurationStatistics"
+                }
               }
             }
           }
@@ -16240,22 +16349,24 @@
         }
       },
       "FeedbackStrategy": {
-        "oneOf": [
+        "anyOf": [
           {
-            "type": "object",
-            "required": [
-              "naive"
-            ],
-            "properties": {
-              "naive": {
-                "$ref": "#/components/schemas/NaiveFeedbackStrategy"
-              }
-            },
-            "additionalProperties": false
+            "$ref": "#/components/schemas/NaiveFeedbackStrategy"
           }
         ]
       },
       "NaiveFeedbackStrategy": {
+        "type": "object",
+        "required": [
+          "naive"
+        ],
+        "properties": {
+          "naive": {
+            "$ref": "#/components/schemas/NaiveFeedbackStrategyParams"
+          }
+        }
+      },
+      "NaiveFeedbackStrategyParams": {
         "type": "object",
         "required": [
           "a",

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
@@ -6,8 +7,9 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::fs::{atomic_save_json, clear_disk_cache, read_json};
 use common::mmap;
-use common::mmap::{AdviceSetting, MmapBitSlice, MmapSlice, create_and_ensure_length};
+use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length};
 use common::types::PointOffsetType;
+use common::universal_io::{MmapFile, OpenOptions, UniversalRead};
 use fs_err as fs;
 use memmap2::MmapMut;
 use serde::{Deserialize, Serialize};
@@ -17,27 +19,31 @@ use super::mutable_numeric_index::InMemoryNumericIndex;
 use crate::common::Flusher;
 use crate::common::mmap_bitslice_buffered_update_wrapper::MmapBitSliceBufferedUpdateWrapper;
 use crate::common::operation_error::{OperationError, OperationResult};
+use crate::common::stored_bitslice::MmapBitSlice;
 use crate::index::field_index::histogram::{Histogram, Numericable, Point};
-use crate::index::field_index::mmap_point_to_values::{MmapPointToValues, MmapValue};
+use crate::index::field_index::stored_point_to_values::{StoredPointToValues, StoredValue};
 
 const PAIRS_PATH: &str = "data.bin";
 const DELETED_PATH: &str = "deleted.bin";
 const CONFIG_PATH: &str = "mmap_field_index_config.json";
 
-pub struct MmapNumericIndex<T: Encodable + Numericable + Default + MmapValue + 'static> {
+pub struct MmapNumericIndex<T: Encodable + Numericable + Default + StoredValue + 'static> {
     path: PathBuf,
-    pub(super) storage: Storage<T>,
+    pub(super) storage: Storage<T, MmapFile>,
     histogram: Histogram<T>,
     deleted_count: usize,
     max_values_per_point: usize,
     is_on_disk: bool,
 }
 
-pub(super) struct Storage<T: Encodable + Numericable + Default + MmapValue + 'static> {
+pub(super) struct Storage<
+    T: Encodable + Numericable + Default + StoredValue + 'static,
+    S: UniversalRead<u8>,
+> {
     deleted: MmapBitSliceBufferedUpdateWrapper,
     // sorted pairs (id + value), sorted by value (by id if values are equal)
     pairs: MmapSlice<Point<T>>,
-    pub(super) point_to_values: MmapPointToValues<T>,
+    pub(super) point_to_values: StoredPointToValues<T, S>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +90,7 @@ impl<T: Encodable + Numericable> DoubleEndedIterator for NumericIndexPairsIterat
     }
 }
 
-impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
+impl<T: Encodable + Numericable + Default + StoredValue> MmapNumericIndex<T> {
     pub fn build(
         in_memory_index: InMemoryNumericIndex<T>,
         path: &Path,
@@ -105,18 +111,13 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
 
         in_memory_index.histogram.save(path)?;
 
-        MmapPointToValues::<T>::from_iter(
+        StoredPointToValues::<T, MmapFile>::from_iter(
             path,
             in_memory_index
                 .point_to_values
                 .iter()
                 .enumerate()
-                .map(|(idx, values)| {
-                    (
-                        idx as PointOffsetType,
-                        values.iter().map(|v| T::as_referenced(v)),
-                    )
-                }),
+                .map(|(idx, values)| (idx as PointOffsetType, values.iter().map(|v| v.borrow()))),
         )?;
 
         {
@@ -132,22 +133,24 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
         }
 
         {
-            const BITS_IN_BYTE: usize = 8;
             let deleted_flags_count = in_memory_index.point_to_values.len();
-            let deleted_file = create_and_ensure_length(
+            let _ = create_and_ensure_length(
                 &deleted_path,
-                BITS_IN_BYTE
-                    * BITS_IN_BYTE
-                    * deleted_flags_count.div_ceil(BITS_IN_BYTE * BITS_IN_BYTE),
+                deleted_flags_count
+                    .div_ceil(u8::BITS as usize)
+                    .next_multiple_of(size_of::<u64>()),
             )?;
-            let mut deleted_mmap = unsafe { MmapMut::map_mut(&deleted_file)? };
-            deleted_mmap.fill(0);
-            let mut deleted_bitflags = MmapBitSlice::from(deleted_mmap, 0);
-            for (idx, values) in in_memory_index.point_to_values.iter().enumerate() {
-                if values.is_empty() {
-                    deleted_bitflags.set(idx, true);
-                }
-            }
+
+            let mut deleted = MmapBitSlice::open(&deleted_path, OpenOptions::default())?;
+            deleted.set_ascending_bits_batch(
+                in_memory_index
+                    .point_to_values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, values)| values.is_empty())
+                    .map(|(idx, _)| (idx as u64, true)),
+            )?;
+            deleted.flusher()()?;
         }
 
         Self::open(path, is_on_disk)?.ok_or_else(|| {
@@ -168,9 +171,8 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
 
         let histogram = Histogram::<T>::load(path)?;
         let config: MmapNumericIndexConfig = read_json(&config_path)?;
-        let deleted = mmap::open_write_mmap(&deleted_path, AdviceSetting::Global, false)?;
-        let deleted = MmapBitSlice::from(deleted, 0);
-        let deleted_count = deleted.count_ones();
+        let deleted = MmapBitSlice::open(&deleted_path, OpenOptions::default())?;
+        let deleted_count = deleted.count_ones()?;
         let do_populate = !is_on_disk;
         let map = unsafe {
             MmapSlice::try_from(mmap::open_write_mmap(
@@ -179,7 +181,7 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
                 do_populate,
             )?)?
         };
-        let point_to_values = MmapPointToValues::open(path, do_populate)?;
+        let point_to_values = StoredPointToValues::open(path, do_populate)?;
 
         Ok(Some(Self {
             path: path.to_path_buf(),
@@ -234,17 +236,15 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
         idx: PointOffsetType,
         check_fn: impl Fn(&T) -> bool,
         hw_counter: &HardwareCounterCell,
-    ) -> bool {
+    ) -> OperationResult<bool> {
         let hw_counter = self.make_conditioned_counter(hw_counter);
 
         if self.storage.deleted.get(idx as usize) == Some(false) {
-            self.storage.point_to_values.check_values_any(
-                idx,
-                |v| check_fn(T::from_referenced(&v)),
-                &hw_counter,
-            )
+            self.storage
+                .point_to_values
+                .check_values_any(idx, |v| check_fn(v), &hw_counter)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -253,8 +253,10 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
             Some(Box::new(
                 self.storage
                     .point_to_values
-                    .get_values(idx)?
-                    .map(|v| *T::from_referenced(&v)),
+                    // TODO: Propagate counter upwards
+                    .values_iter(idx, ConditionedCounter::never())
+                    .ok()??
+                    .map(|v| *v),
             ))
         } else {
             None
@@ -263,7 +265,7 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
 
     pub fn values_count(&self, idx: PointOffsetType) -> Option<usize> {
         if self.storage.deleted.get(idx as usize) == Some(false) {
-            self.storage.point_to_values.get_values_count(idx)
+            self.storage.point_to_values.get_values_count(idx).ok()?
         } else {
             None
         }
@@ -392,7 +394,7 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
     /// Block until all pages are populated.
     pub fn populate(&self) -> OperationResult<()> {
         self.storage.pairs.populate()?;
-        self.storage.point_to_values.populate();
+        self.storage.point_to_values.populate()?;
         Ok(())
     }
 

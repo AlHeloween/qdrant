@@ -1,16 +1,18 @@
 use std::alloc::Layout;
+use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use common::generic_consts::Sequential;
 use common::mmap::{Advice, AdviceSetting, Madviseable, open_read_mmap};
 use common::types::PointOffsetType;
 use memmap2::Mmap;
 
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::index::hnsw_index::HnswM;
+use crate::vector_storage::VectorStorageEnum;
 use crate::vector_storage::quantized::quantized_vectors::QuantizedVectors;
-use crate::vector_storage::{Sequential, VectorStorageEnum};
 
 mod header;
 mod serializer;
@@ -70,13 +72,19 @@ pub enum GraphLinksFormatParam<'a> {
 
 /// This trait lets the [`serialize_graph_links`] to access vector values.
 pub trait GraphLinksVectors {
+    /// Call `f` with the raw bytes of the base vector for `point_id`.
+    ///
     /// Base vectors will be included once per point on level 0.
     /// The layout of each vector must correspond to [`VectorLayout::base`].
-    fn get_base_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]>;
+    fn for_base_vector(
+        &self,
+        point_id: PointOffsetType,
+        f: &mut dyn FnMut(&[u8]) -> OperationResult<()>,
+    ) -> OperationResult<()>;
 
     /// Link vectors will be included for each link per point.
     /// The layout of each vector must correspond to [`VectorLayout::link`].
-    fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]>;
+    fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<Cow<'_, [u8]>>;
 
     /// Get the layout of base and link vectors.
     fn vectors_layout(&self) -> GraphLinksVectorsLayout;
@@ -116,18 +124,22 @@ impl<'a> StorageGraphLinksVectors<'a> {
 impl<'a> GraphLinksVectors for StorageGraphLinksVectors<'a> {
     /// Note: uses [`Sequential`] because [`serializer::serialize_graph_links`]
     /// traverses base vectors in a sequential order.
-    fn get_base_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]> {
+    fn for_base_vector(
+        &self,
+        point_id: PointOffsetType,
+        f: &mut dyn FnMut(&[u8]) -> OperationResult<()>,
+    ) -> OperationResult<()> {
         self.vector_storage
-            .get_vector_bytes_opt::<Sequential>(point_id)
-            .ok_or_else(|| {
-                OperationError::service_error(format!(
+            .with_vector_bytes_opt::<Sequential, _>(point_id, f)
+            .unwrap_or_else(|| {
+                Err(OperationError::service_error(format!(
                     "Point {point_id} not found in vector storage"
-                ))
+                )))
             })
     }
 
     /// Note: unlike base vectors, link vectors are written in a random order.
-    fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]> {
+    fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<Cow<'_, [u8]>> {
         Ok(self.quantized_vectors.get_quantized_vector(point_id))
     }
 
@@ -346,7 +358,7 @@ pub(super) fn normalize_links(m: usize, mut links: Vec<PointOffsetType>) -> Vec<
 #[cfg(test)]
 mod tests {
     use common::fs::atomic_save;
-    use rand::Rng;
+    use rand::RngExt;
     use rstest::rstest;
     use tempfile::Builder;
 
@@ -380,12 +392,16 @@ mod tests {
     }
 
     impl GraphLinksVectors for TestGraphLinksVectors {
-        fn get_base_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]> {
-            Ok(&self.base_vectors[point_id as usize])
+        fn for_base_vector(
+            &self,
+            point_id: PointOffsetType,
+            f: &mut dyn FnMut(&[u8]) -> OperationResult<()>,
+        ) -> OperationResult<()> {
+            f(&self.base_vectors[point_id as usize])
         }
 
-        fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<&[u8]> {
-            Ok(&self.link_vectors[point_id as usize])
+        fn get_link_vector(&self, point_id: PointOffsetType) -> OperationResult<Cow<'_, [u8]>> {
+            Ok(Cow::Borrowed(&self.link_vectors[point_id as usize]))
         }
 
         fn vectors_layout(&self) -> GraphLinksVectorsLayout {
@@ -425,12 +441,17 @@ mod tests {
             let links: Vec<_> = if let Some(vectors) = vectors {
                 let (base_vector, iter) = right.links_with_vectors(point_id, level);
                 if level == 0 {
-                    assert_eq!(base_vector, vectors.get_base_vector(point_id).unwrap());
+                    vectors
+                        .for_base_vector(point_id, &mut |bytes| {
+                            assert_eq!(base_vector, bytes);
+                            Ok(())
+                        })
+                        .unwrap();
                 } else {
                     assert!(base_vector.is_empty());
                 }
                 iter.map(|(link, bytes)| {
-                    assert_eq!(bytes, vectors.get_link_vector(link).unwrap());
+                    assert_eq!(bytes, vectors.get_link_vector(link).unwrap().as_ref());
                     link
                 })
                 .collect()

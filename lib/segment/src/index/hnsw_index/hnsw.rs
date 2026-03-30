@@ -5,13 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
-use bitvec::prelude::BitSlice;
-use bitvec::vec::BitVec;
+use common::bitvec::{BitSlice, BitSliceExt as _, BitVec};
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::cow::BoxCow;
 #[cfg(target_os = "linux")]
 use common::cpu::linux_low_thread_priority;
-use common::ext::BitSliceExt as _;
 use common::flags::FeatureFlags;
 use common::fs::clear_disk_cache;
 use common::progress_tracker::ProgressTracker;
@@ -37,7 +35,7 @@ use crate::common::operation_time_statistics::{
 };
 use crate::data_types::query_context::VectorQueryContext;
 use crate::data_types::vectors::{QueryVector, VectorInternal, VectorRef};
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::hnsw_index::HnswM;
 use crate::index::hnsw_index::build_condition_checker::BuildConditionChecker;
 use crate::index::hnsw_index::config::HnswGraphConfig;
@@ -70,7 +68,7 @@ use crate::types::{
     QuantizationSearchParams, SearchParams,
 };
 use crate::vector_storage::quantized::quantized_vectors::QuantizedVectors;
-use crate::vector_storage::query::DiscoveryQuery;
+use crate::vector_storage::query::DiscoverQuery;
 use crate::vector_storage::{VectorStorage, VectorStorageEnum, new_raw_scorer};
 
 const HNSW_USE_HEURISTIC: bool = true;
@@ -87,7 +85,7 @@ const LINK_COMPRESSION_CONVERT_EXISTING: bool = false;
 
 #[derive(Debug)]
 pub struct HNSWIndex {
-    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     quantized_vectors: Arc<AtomicRefCell<Option<QuantizedVectors>>>,
     payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
@@ -125,7 +123,7 @@ impl HNSWSearchesTelemetry {
 
 pub struct HnswIndexOpenArgs<'a> {
     pub path: &'a Path,
-    pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    pub id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     pub vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     pub quantized_vectors: Arc<AtomicRefCell<Option<QuantizedVectors>>>,
     pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
@@ -377,7 +375,10 @@ impl HNSWIndex {
         let old_index = old_index.map(|old_index| old_index.reuse(total_vector_count));
 
         let mut indexed_vectors = 0;
-        for vector_id in id_tracker_ref.iter_internal_excluding(deleted_bitslice) {
+        for vector_id in id_tracker_ref
+            .point_mappings()
+            .iter_internal_excluding(deleted_bitslice)
+        {
             check_process_stopped(stopped)?;
             indexed_vectors += 1;
 
@@ -425,7 +426,9 @@ impl HNSWIndex {
             let mut ids = Vec::with_capacity(total_vector_count);
             let mut first_few_ids = Vec::with_capacity(SINGLE_THREADED_HNSW_BUILD_THRESHOLD);
 
-            let mut ids_iter = id_tracker_ref.iter_internal_excluding(deleted_bitslice);
+            let mut ids_iter = id_tracker_ref
+                .point_mappings()
+                .iter_internal_excluding(deleted_bitslice);
             if let Some(old_index) = old_index {
                 progress_migrate.start();
 
@@ -511,6 +514,7 @@ impl HNSWIndex {
 
             // Estimate connectivity of the main graph
             let all_points = id_tracker_ref
+                .point_mappings()
                 .iter_internal_excluding(deleted_bitslice)
                 .collect::<Vec<_>>();
 
@@ -590,6 +594,7 @@ impl HNSWIndex {
                 let counter = field_progress.track_progress(None);
 
                 for payload_block in payload_index_ref.payload_blocks(&field, full_scan_threshold) {
+                    let payload_block = payload_block?;
                     check_process_stopped(stopped)?;
 
                     if payload_block.cardinality > max_block_size {
@@ -602,7 +607,7 @@ impl HNSWIndex {
                         &payload_index_ref,
                         &vector_storage_ref,
                         stopped,
-                    );
+                    )?;
 
                     // This is a heuristic to skip building graph for mostly deleted blocks.
                     // It might be, that majority of points do not actually have vectors
@@ -731,11 +736,11 @@ impl HNSWIndex {
     /// Get list of points for indexing, associated with payload block filtering condition
     fn condition_points(
         condition: FieldCondition,
-        id_tracker: &IdTrackerSS,
+        id_tracker: &IdTrackerEnum,
         payload_index: &StructPayloadIndex,
         vector_storage: &VectorStorageEnum,
         stopped: &AtomicBool,
-    ) -> Vec<PointOffsetType> {
+    ) -> OperationResult<Vec<PointOffsetType>> {
         let filter = Filter::new_must(Field(condition));
 
         let disposed_hw_counter = HardwareCounterCell::disposable(); // Internal operation. No measurements needed
@@ -743,25 +748,28 @@ impl HNSWIndex {
         let deleted_bitslice = vector_storage.deleted_vector_bitslice();
 
         let cardinality_estimation =
-            payload_index.estimate_cardinality(&filter, &disposed_hw_counter);
+            payload_index.estimate_cardinality(&filter, &disposed_hw_counter)?;
+        let point_mappings = id_tracker.point_mappings();
 
-        payload_index
+        Ok(payload_index
             .iter_filtered_points(
                 &filter,
                 id_tracker,
+                &point_mappings,
                 &cardinality_estimation,
                 &disposed_hw_counter,
                 stopped,
-            )
+                None,
+            )?
             .filter(|&point_id| !deleted_bitslice.get_bit(point_id as usize).unwrap_or(false))
-            .collect()
+            .collect())
     }
 
     #[allow(clippy::too_many_arguments)]
     #[allow(unused_variables)]
     #[allow(clippy::needless_pass_by_ref_mut)]
     fn build_filtered_graph(
-        id_tracker: &IdTrackerSS,
+        id_tracker: &IdTrackerEnum,
         vector_storage: &VectorStorageEnum,
         quantized_vectors: &Option<QuantizedVectors>,
         #[allow(unused_variables)] gpu_insert_context: &mut Option<GpuInsertContext<'_>>,
@@ -849,7 +857,7 @@ impl HNSWIndex {
     #[cfg(feature = "gpu")]
     #[allow(clippy::too_many_arguments)]
     fn build_main_graph_on_gpu(
-        id_tracker: &IdTrackerSS,
+        id_tracker: &IdTrackerEnum,
         vector_storage: &VectorStorageEnum,
         quantized_vectors: &Option<QuantizedVectors>,
         gpu_vectors: Option<&GpuVectorStorage>,
@@ -886,7 +894,9 @@ impl HNSWIndex {
         Self::build_graph_on_gpu(
             gpu_insert_context.as_mut(),
             graph_layers_builder,
-            id_tracker.iter_internal_excluding(deleted_bitslice),
+            id_tracker
+                .point_mappings()
+                .iter_internal_excluding(deleted_bitslice),
             entry_points_num,
             points_scorer_builder,
             stopped,
@@ -896,7 +906,7 @@ impl HNSWIndex {
     #[cfg(feature = "gpu")]
     #[allow(clippy::too_many_arguments)]
     fn build_filtered_graph_on_gpu(
-        id_tracker: &IdTrackerSS,
+        id_tracker: &IdTrackerEnum,
         vector_storage: &VectorStorageEnum,
         quantized_vectors: &Option<QuantizedVectors>,
         gpu_insert_context: Option<&mut GpuInsertContext<'_>>,
@@ -1057,7 +1067,7 @@ impl HNSWIndex {
                 1.0
             } else {
                 let query_point_cardinality =
-                    payload_index.estimate_cardinality(filter, &hw_counter);
+                    payload_index.estimate_cardinality(filter, &hw_counter)?;
                 let query_cardinality = adjust_to_available_vectors(
                     query_point_cardinality,
                     available_vector_count,
@@ -1090,7 +1100,13 @@ impl HNSWIndex {
                 vector.to_owned(),
                 &vector_storage,
                 Some(quantized_vectors),
-                filter.map(|f| BoxCow::Owned(payload_index.filter_context(f, &hw_counter))),
+                filter
+                    .map(|f| {
+                        payload_index
+                            .filter_context(f, &hw_counter)
+                            .map(BoxCow::Owned)
+                    })
+                    .transpose()?,
                 deleted_points,
                 vector_query_context.hardware_counter(),
             )?;
@@ -1120,7 +1136,9 @@ impl HNSWIndex {
         };
 
         let regular_search = || -> OperationResult<Vec<ScoredPointOffset>> {
-            let filter_context = filter.map(|f| payload_index.filter_context(f, &hw_counter));
+            let filter_context = filter
+                .map(|f| payload_index.filter_context(f, &hw_counter))
+                .transpose()?;
             let points_scorer = Self::construct_search_scorer(
                 vector,
                 &vector_storage,
@@ -1172,8 +1190,8 @@ impl HNSWIndex {
         vectors
             .iter()
             .map(|&vector| match vector {
-                QueryVector::Discovery(discovery_query) => self.discovery_search_with_graph(
-                    discovery_query.clone(),
+                QueryVector::Discover(discover_query) => self.discover_search_with_graph(
+                    discover_query.clone(),
                     filter,
                     top,
                     params,
@@ -1234,14 +1252,14 @@ impl HNSWIndex {
     fn search_plain_batched(
         &self,
         vectors: &[&QueryVector],
-        filtered_points: &[PointOffsetType],
+        filtered_points: impl Iterator<Item = PointOffsetType>,
         top: usize,
         params: Option<&SearchParams>,
         vector_query_context: &VectorQueryContext,
     ) -> OperationResult<Vec<Vec<ScoredPointOffset>>> {
         self.search_plain_iterator_batched(
             vectors,
-            filtered_points.iter().copied(),
+            filtered_points,
             top,
             params,
             vector_query_context,
@@ -1256,7 +1274,7 @@ impl HNSWIndex {
         vector_query_context: &VectorQueryContext,
     ) -> OperationResult<Vec<Vec<ScoredPointOffset>>> {
         let id_tracker = self.id_tracker.borrow();
-        let ids_iterator = id_tracker.iter_internal();
+        let ids_iterator = id_tracker.point_mappings().iter_internal();
         self.search_plain_iterator_batched(vectors, ids_iterator, top, params, vector_query_context)
     }
 
@@ -1268,25 +1286,37 @@ impl HNSWIndex {
         params: Option<&SearchParams>,
         vector_query_context: &VectorQueryContext,
     ) -> OperationResult<Vec<Vec<ScoredPointOffset>>> {
+        let hw_counter = &vector_query_context.hardware_counter();
+        let is_stopped = &vector_query_context.is_stopped();
+
+        let id_tracker = self.id_tracker.borrow();
         let payload_index = self.payload_index.borrow();
-        let filtered_points = payload_index.query_points(
+        let query_cardinality = payload_index.estimate_cardinality(filter, hw_counter)?;
+        let point_mappings = id_tracker.point_mappings();
+        // Assume query is already estimated to be small enough so we can iterate over all matched ids
+        let filtered_points = payload_index.iter_filtered_points(
             filter,
-            &vector_query_context.hardware_counter(),
-            &vector_query_context.is_stopped(),
-        );
-        self.search_plain_batched(vectors, &filtered_points, top, params, vector_query_context)
+            &id_tracker,
+            &point_mappings,
+            &query_cardinality,
+            hw_counter,
+            is_stopped,
+            // No deferred filtering here since it's HNSW index.
+            None,
+        )?;
+        self.search_plain_batched(vectors, filtered_points, top, params, vector_query_context)
     }
 
-    fn discovery_search_with_graph(
+    fn discover_search_with_graph(
         &self,
-        discovery_query: DiscoveryQuery<VectorInternal>,
+        discover_query: DiscoverQuery<VectorInternal>,
         filter: Option<&Filter>,
         top: usize,
         params: Option<&SearchParams>,
         vector_query_context: &VectorQueryContext,
     ) -> OperationResult<Vec<ScoredPointOffset>> {
         // Stage 1: Find best entry points using Context search
-        let query_vector = QueryVector::Context(discovery_query.pairs.clone().into());
+        let query_vector = QueryVector::Context(discover_query.pairs.clone().into());
 
         const DISCOVERY_ENTRY_POINT_COUNT: usize = 10;
 
@@ -1301,8 +1331,8 @@ impl HNSWIndex {
             )
             .map(|search_result| search_result.iter().map(|x| x.idx).collect())?;
 
-        // Stage 2: Discovery search with entry points
-        let query_vector = QueryVector::Discovery(discovery_query);
+        // Stage 2: Discover search with entry points
+        let query_vector = QueryVector::Discover(discover_query);
 
         self.search_with_graph(
             &query_vector,
@@ -1464,7 +1494,7 @@ impl VectorIndex for HNSWIndex {
                 let hw_counter = query_context.hardware_counter();
 
                 let query_point_cardinality =
-                    payload_index.estimate_cardinality(query_filter, &hw_counter);
+                    payload_index.estimate_cardinality(query_filter, &hw_counter)?;
                 let query_cardinality = adjust_to_available_vectors(
                     query_point_cardinality,
                     available_vector_count,
@@ -1497,7 +1527,7 @@ impl VectorIndex for HNSWIndex {
                     );
                 }
 
-                let filter_context = payload_index.filter_context(query_filter, &hw_counter);
+                let filter_context = payload_index.filter_context(query_filter, &hw_counter)?;
 
                 // Fast cardinality estimation is not enough, do sample estimation of cardinality
                 let id_tracker = self.id_tracker.borrow();
@@ -1605,7 +1635,7 @@ impl<'a> OldIndexCandidate<'a> {
         hnsw_global_config: &HnswGlobalConfig,
         vector_storage: &VectorStorageEnum,
         quantized_vectors: &Option<QuantizedVectors>,
-        id_tracker: &IdTrackerSS,
+        id_tracker: &IdTrackerEnum,
     ) -> Option<Self> {
         if !feature_flags.incremental_hnsw_building {
             return None;
@@ -1664,8 +1694,8 @@ impl<'a> OldIndexCandidate<'a> {
         // If we have `in both` case, we need to fill the `old_to_new` mapping.
         // Otherwise, we are interested in counts of "missing" points - which absence in the new
         for item in itertools::merge_join_by(
-            id_tracker.iter_from(None),
-            old_id_tracker.iter_from(None),
+            id_tracker.point_mappings().iter_from(None),
+            old_id_tracker.point_mappings().iter_from(None),
             |(new_external_id, _), (old_external_id, _)| new_external_id.cmp(old_external_id),
         ) {
             let (new_offset, old_offset): (Option<PointOffsetType>, Option<PointOffsetType>) =

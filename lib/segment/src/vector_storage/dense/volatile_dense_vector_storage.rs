@@ -2,9 +2,9 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
-use bitvec::prelude::{BitSlice, BitVec};
+use common::bitvec::{BitSlice, BitSliceExt as _, BitVec, bitvec_set_deleted};
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::ext::BitSliceExt as _;
+use common::generic_consts::AccessPattern;
 use common::types::PointOffsetType;
 
 use crate::common::Flusher;
@@ -13,10 +13,9 @@ use crate::data_types::named_vectors::CowVector;
 use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{VectorElementType, VectorRef};
 use crate::types::{Distance, VectorStorageDatatype};
-use crate::vector_storage::bitvec::bitvec_set_deleted;
-use crate::vector_storage::chunked_vectors::ChunkedVectors;
+use crate::vector_storage::volatile_chunked_vectors::VolatileChunkedVectors;
 use crate::vector_storage::{
-    AccessPattern, DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 /// In-memory vector storage that is volatile
@@ -26,7 +25,7 @@ use crate::vector_storage::{
 pub struct VolatileDenseVectorStorage<T: PrimitiveVectorElement> {
     dim: usize,
     distance: Distance,
-    vectors: ChunkedVectors<T>,
+    vectors: VolatileChunkedVectors<T>,
     /// BitVec for deleted flags. Grows dynamically upto last set flag.
     deleted: BitVec,
     /// Current number of deleted vectors.
@@ -52,7 +51,7 @@ impl<T: PrimitiveVectorElement> VolatileDenseVectorStorage<T> {
         Self {
             dim,
             distance,
-            vectors: ChunkedVectors::new(dim),
+            vectors: VolatileChunkedVectors::new(dim),
             deleted: BitVec::new(),
             deleted_count: 0,
         }
@@ -81,8 +80,8 @@ impl<T: PrimitiveVectorElement> DenseVectorStorage<T> for VolatileDenseVectorSto
         self.dim
     }
 
-    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> &[T] {
-        self.vectors.get(key as VectorOffsetType)
+    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> Cow<'_, [T]> {
+        Cow::Borrowed(self.vectors.get(key as VectorOffsetType))
     }
 }
 

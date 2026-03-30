@@ -1,11 +1,12 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use bitvec::prelude::{BitSlice, BitVec};
+use common::bitvec::{BitSlice, BitSliceExt as _, BitVec, bitvec_set_deleted};
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::ext::BitSliceExt as _;
+use common::generic_consts::AccessPattern;
 use common::types::PointOffsetType;
 use parking_lot::RwLock;
 use rocksdb::DB;
@@ -19,11 +20,10 @@ use crate::data_types::vectors::{
     TypedMultiDenseVector, TypedMultiDenseVectorRef, VectorElementType, VectorRef,
 };
 use crate::types::{Distance, MultiVectorConfig, VectorStorageDatatype};
-use crate::vector_storage::bitvec::bitvec_set_deleted;
-use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::common::{CHUNK_SIZE, StoredRecord};
+use crate::vector_storage::volatile_chunked_vectors::VolatileChunkedVectors;
 use crate::vector_storage::{
-    AccessPattern, MultiVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    MultiVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 type StoredMultiDenseVector<T> = StoredRecord<TypedMultiDenseVector<T>>;
@@ -43,7 +43,7 @@ pub struct SimpleMultiDenseVectorStorage<T: PrimitiveVectorElement> {
     distance: Distance,
     multi_vector_config: MultiVectorConfig,
     /// Keep vectors in memory
-    vectors: ChunkedVectors<T>,
+    vectors: VolatileChunkedVectors<T>,
     vectors_metadata: Vec<MultiVectorMetadata>,
     db_wrapper: DatabaseColumnWrapper,
     /// BitVec for deleted flags. Grows dynamically upto last set flag.
@@ -168,7 +168,7 @@ fn open_simple_multi_dense_vector_storage_impl<T: PrimitiveVectorElement>(
     multi_vector_config: MultiVectorConfig,
     stopped: &AtomicBool,
 ) -> OperationResult<SimpleMultiDenseVectorStorage<T>> {
-    let mut vectors = ChunkedVectors::new(dim);
+    let mut vectors = VolatileChunkedVectors::new(dim);
     let mut vectors_metadata = Vec::<MultiVectorMetadata>::new();
     let (mut deleted, mut deleted_count) = (BitVec::new(), 0);
     let db_wrapper = DatabaseColumnWrapper::new(database, database_column_name);
@@ -336,7 +336,7 @@ impl<T: PrimitiveVectorElement> MultiVectorStorage<T> for SimpleMultiDenseVector
     }
 
     /// Panics if key is out of bounds
-    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> TypedMultiDenseVectorRef<'_, T> {
+    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> CowMultiVector<'_, T> {
         self.get_multi_opt::<P>(key).expect("vector not found")
     }
 
@@ -344,24 +344,25 @@ impl<T: PrimitiveVectorElement> MultiVectorStorage<T> for SimpleMultiDenseVector
     fn get_multi_opt<P: AccessPattern>(
         &self,
         key: PointOffsetType,
-    ) -> Option<TypedMultiDenseVectorRef<'_, T>> {
+    ) -> Option<CowMultiVector<'_, T>> {
         // No sequential optimizations available for in memory storage.
         self.vectors_metadata.get(key as usize).map(|metadata| {
             let flattened_vectors = self
                 .vectors
                 .get_many(metadata.start, metadata.inner_vectors_count)
                 .unwrap_or_else(|| panic!("Vectors does not contain data for {metadata:?}"));
-            TypedMultiDenseVectorRef {
+            CowMultiVector::Borrowed(TypedMultiDenseVectorRef {
                 flattened_vectors,
                 dim: self.dim,
-            }
+            })
         })
     }
 
-    fn iterate_inner_vectors(&self) -> impl Iterator<Item = &[T]> + Clone + Send {
+    fn iterate_inner_vectors(&self) -> impl Iterator<Item = Cow<'_, [T]>> + Clone + Send {
         (0..self.total_vector_count()).flat_map(|key| {
             let metadata = &self.vectors_metadata[key];
-            (0..metadata.inner_vectors_count).map(|i| self.vectors.get(metadata.start + i))
+            (0..metadata.inner_vectors_count)
+                .map(|i| Cow::Borrowed(self.vectors.get(metadata.start + i)))
         })
     }
 
@@ -403,9 +404,7 @@ impl<T: PrimitiveVectorElement> VectorStorage for SimpleMultiDenseVectorStorage<
 
     fn get_vector_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<CowVector<'_>> {
         self.get_multi_opt::<P>(key).map(|multi_dense_vector| {
-            CowVector::MultiDense(T::into_float_multivector(CowMultiVector::Borrowed(
-                multi_dense_vector,
-            )))
+            CowVector::MultiDense(T::into_float_multivector(multi_dense_vector))
         })
     }
 
@@ -472,15 +471,15 @@ impl<T: PrimitiveVectorElement> VectorStorage for SimpleMultiDenseVectorStorage<
 
 #[cfg(test)]
 mod tests {
+    use common::generic_consts::Sequential;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use tempfile::Builder;
 
     use super::*;
     use crate::common::rocksdb_wrapper::{DB_VECTOR_CF, open_db};
     use crate::data_types::vectors::MultiDenseVectorInternal;
     use crate::segment_constructor::migrate_rocksdb_multi_dense_vector_storage_to_mmap;
-    use crate::vector_storage::Sequential;
 
     const RAND_SEED: u64 = 42;
 

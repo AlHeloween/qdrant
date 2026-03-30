@@ -1,10 +1,12 @@
 use std::alloc::Layout;
+use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::{atomic_save_json, clear_disk_cache, read_json};
+use common::generic_consts::{Random, Sequential};
 use common::types::PointOffsetType;
 use quantization::encoded_vectors_binary::EncodedVectorsBin;
 use quantization::encoded_vectors_u8::ScalarQuantizationMethod;
@@ -41,8 +43,8 @@ use crate::vector_storage::quantized::quantized_ram_storage::{
     QuantizedRamStorage, QuantizedRamStorageBuilder,
 };
 use crate::vector_storage::{
-    DenseVectorStorage, MultiVectorStorage, Random, RawScorer, RawScorerImpl, Sequential,
-    VectorStorage, VectorStorageEnum,
+    DenseVectorStorage, MultiVectorStorage, RawScorer, RawScorerImpl, VectorStorage,
+    VectorStorageEnum,
 };
 
 pub const QUANTIZED_CONFIG_PATH: &str = "quantized.config.json";
@@ -266,7 +268,7 @@ impl QuantizedVectors {
         }
     }
 
-    pub fn get_quantized_vector(&self, id: PointOffsetType) -> &[u8] {
+    pub fn get_quantized_vector(&self, id: PointOffsetType) -> Cow<'_, [u8]> {
         match &self.storage_impl {
             QuantizedVectorStorage::ScalarRam(storage) => storage.get_quantized_vector(id),
             QuantizedVectorStorage::ScalarMmap(storage) => storage.get_quantized_vector(id),
@@ -536,6 +538,33 @@ impl QuantizedVectors {
                 max_threads,
                 stopped,
             ),
+            #[cfg(target_os = "linux")]
+            VectorStorageEnum::DenseUring(v) => Self::create_impl(
+                v.as_ref(),
+                quantization_config,
+                storage_type,
+                path,
+                max_threads,
+                stopped,
+            ),
+            #[cfg(target_os = "linux")]
+            VectorStorageEnum::DenseUringByte(v) => Self::create_impl(
+                v.as_ref(),
+                quantization_config,
+                storage_type,
+                path,
+                max_threads,
+                stopped,
+            ),
+            #[cfg(target_os = "linux")]
+            VectorStorageEnum::DenseUringHalf(v) => Self::create_impl(
+                v.as_ref(),
+                quantization_config,
+                storage_type,
+                path,
+                max_threads,
+                stopped,
+            ),
             VectorStorageEnum::DenseAppendableMemmap(v) => Self::create_impl(
                 v.as_ref(),
                 quantization_config,
@@ -660,11 +689,22 @@ impl QuantizedVectors {
         let distance = vector_storage.distance();
         let datatype = vector_storage.datatype();
         let vectors = (0..count as PointOffsetType).map(|i| {
-            PrimitiveVectorElement::quantization_preprocess(
-                quantization_config,
-                distance,
-                vector_storage.get_dense::<Sequential>(i),
-            )
+            match vector_storage.get_dense::<Sequential>(i) {
+                Cow::Borrowed(slice) => PrimitiveVectorElement::quantization_preprocess(
+                    quantization_config,
+                    distance,
+                    slice,
+                ),
+                Cow::Owned(vec) => Cow::Owned(
+                    // TODO: Preprocess without reallocating
+                    PrimitiveVectorElement::quantization_preprocess(
+                        quantization_config,
+                        distance,
+                        &vec,
+                    )
+                    .into_owned(),
+                ),
+            }
         });
         let on_disk_vector_storage = vector_storage.is_on_disk();
 
@@ -744,8 +784,21 @@ impl QuantizedVectors {
         let distance = vector_storage.distance();
         let datatype = vector_storage.datatype();
         let multi_vector_config = *vector_storage.multi_vector_config();
-        let vectors = vector_storage.iterate_inner_vectors().map(|v| {
-            PrimitiveVectorElement::quantization_preprocess(quantization_config, distance, v)
+        let vectors = vector_storage.iterate_inner_vectors().map(|v| match v {
+            Cow::Borrowed(slice) => PrimitiveVectorElement::quantization_preprocess(
+                quantization_config,
+                distance,
+                slice,
+            ),
+            // TODO: avoid reallocation by accepting Cow in quantization_preprocess
+            Cow::Owned(vec) => Cow::Owned(
+                PrimitiveVectorElement::quantization_preprocess(
+                    quantization_config,
+                    distance,
+                    &vec,
+                )
+                .into_owned(),
+            ),
         });
         let inner_vectors_count = vectors.clone().count();
         let vectors_count = vector_storage.total_vector_count();
@@ -755,7 +808,12 @@ impl QuantizedVectors {
             Self::construct_vector_parameters(distance, dim, inner_vectors_count, storage_type);
 
         let offsets = (0..vectors_count as PointOffsetType)
-            .map(|idx| vector_storage.get_multi::<Random>(idx).vectors_count() as PointOffsetType)
+            .map(|idx| {
+                vector_storage
+                    .get_multi::<Random>(idx)
+                    .as_ref()
+                    .vectors_count() as PointOffsetType
+            })
             .scan(0, |offset_acc, multi_vector_len| {
                 let offset = *offset_acc;
                 *offset_acc += multi_vector_len;

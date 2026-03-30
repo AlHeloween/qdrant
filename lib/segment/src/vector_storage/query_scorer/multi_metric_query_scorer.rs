@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::generic_consts::Random;
 use common::typelevel::False;
 use common::types::{PointOffsetType, ScoreType};
 
@@ -12,9 +13,9 @@ use crate::data_types::vectors::{
     DenseVector, MultiDenseVectorInternal, TypedMultiDenseVector, TypedMultiDenseVectorRef,
 };
 use crate::spaces::metric::Metric;
+use crate::vector_storage::MultiVectorStorage;
 use crate::vector_storage::common::VECTOR_READ_BATCH_SIZE;
 use crate::vector_storage::query_scorer::QueryScorer;
-use crate::vector_storage::{MultiVectorStorage, Random};
 
 pub struct MultiMetricQueryScorer<
     'a,
@@ -97,9 +98,9 @@ impl<
         let stored = self.vector_storage.get_multi::<Random>(idx);
         self.hardware_counter
             .vector_io_read()
-            .incr_delta(stored.vectors_count());
+            .incr_delta(stored.as_ref().vectors_count());
 
-        self.score_multi(TypedMultiDenseVectorRef::from(&self.query), stored)
+        self.score_multi(TypedMultiDenseVectorRef::from(&self.query), stored.as_ref())
     }
 
     #[inline]
@@ -114,19 +115,19 @@ impl<
         debug_assert!(ids.len() <= VECTOR_READ_BATCH_SIZE);
         debug_assert_eq!(ids.len(), scores.len());
 
-        let mut vectors = [MaybeUninit::uninit(); VECTOR_READ_BATCH_SIZE];
+        let mut vectors = [const { MaybeUninit::uninit() }; VECTOR_READ_BATCH_SIZE];
         let vectors = self
             .vector_storage
             .get_batch_multi(ids, &mut vectors[..ids.len()]);
 
-        let total_read = vectors.iter().map(|v| v.vectors_count()).sum();
+        let total_read = vectors.iter().map(|v| v.as_ref().vectors_count()).sum();
 
         self.hardware_counter
             .vector_io_read()
             .incr_delta(total_read);
 
         for idx in 0..ids.len() {
-            scores[idx] = self.score_ref(vectors[idx]);
+            scores[idx] = self.score_ref(vectors[idx].as_ref());
         }
     }
 
@@ -135,9 +136,9 @@ impl<
         let v2 = self.vector_storage.get_multi::<Random>(point_b);
         self.hardware_counter
             .vector_io_read()
-            .incr_delta(v1.vectors_count() + v2.vectors_count());
+            .incr_delta(v1.as_ref().vectors_count() + v2.as_ref().vectors_count());
 
-        self.score_multi(v1, v2)
+        self.score_multi(v1.as_ref(), v2.as_ref())
     }
 
     type SupportsBytes = False;

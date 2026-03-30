@@ -35,6 +35,27 @@ impl Collection {
             .check_transfer_exists(transfer_key)
     }
 
+    async fn is_prevent_unoptimized(&self) -> bool {
+        self.effective_optimizers_config()
+            .await
+            .map(|config| config.prevent_unoptimized.unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    pub async fn default_shard_transfer_method(&self) -> ShardTransferMethod {
+        if self.is_prevent_unoptimized().await {
+            // With prevent_unoptimized, use snapshot as the default method.
+            // For automatic transfers, mod.rs prefers WalDelta when all peers
+            // support it and falls back to this default otherwise.
+            log::info!("Using snapshot transfer method because prevent_unoptimized is enabled");
+            ShardTransferMethod::Snapshot
+        } else {
+            self.shared_storage_config
+                .default_shard_transfer_method
+                .unwrap_or(ShardTransferMethod::StreamRecords)
+        }
+    }
+
     pub async fn start_shard_transfer<T, F>(
         &self,
         mut shard_transfer: ShardTransfer,
@@ -48,13 +69,10 @@ impl Collection {
         F: Future<Output = ()> + Send + 'static,
     {
         // Select transfer method
+        let default_method = self.default_shard_transfer_method().await;
         if shard_transfer.method.is_none() {
-            let method = self
-                .shared_storage_config
-                .default_shard_transfer_method
-                .unwrap_or_default();
-            log::warn!("No shard transfer method selected, defaulting to {method:?}");
-            shard_transfer.method.replace(method);
+            log::warn!("No shard transfer method selected, defaulting to {default_method:?}");
+            shard_transfer.method.replace(default_method);
         }
 
         let do_transfer = {
@@ -81,7 +99,7 @@ impl Collection {
             let from_is_local = from_replica_set.is_local().await;
             let to_is_local = to_replica_set.is_local().await;
 
-            let transfer_method = shard_transfer.method.unwrap_or_default();
+            let transfer_method = shard_transfer.method.unwrap_or(default_method);
             let initial_state = match transfer_method {
                 ShardTransferMethod::StreamRecords => ReplicaState::Partial,
 
@@ -172,6 +190,14 @@ impl Collection {
 
         let progress = Arc::new(Mutex::new(TransferTaskProgress::new()));
 
+        // With prevent_unoptimized, fall back to snapshot which preserves deferred
+        // point state exactly (raw segment copy). stream_records sends deferred
+        // points but they won't be deferred on the target.
+        let fallback_method = if self.is_prevent_unoptimized().await {
+            ShardTransferMethod::Snapshot
+        } else {
+            ShardTransferMethod::StreamRecords
+        };
         let transfer_task = transfer::driver::spawn_transfer_task(
             shard_holder,
             progress.clone(),
@@ -181,6 +207,7 @@ impl Collection {
             channel_service,
             self.snapshots_path.clone(),
             temp_dir,
+            fallback_method,
             on_finish,
             on_error,
         );
@@ -313,7 +340,7 @@ impl Collection {
     ) -> CollectionResult<()> {
         // TODO: Ensure cancel safety!
         let transfer_key = transfer.key();
-        log::debug!("Aborting shard transfer {transfer_key:?}");
+        log::debug!("Aborting shard transfer {transfer:?}");
 
         let _transfer_result = self
             .transfer_tasks

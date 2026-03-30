@@ -8,7 +8,7 @@ use fs_err::File;
 use rstest::rstest;
 use segment::data_types::index::{IntegerIndexParams, KeywordIndexParams};
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_vector};
-use segment::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
+use segment::entry::entry_point::{NonAppendableSegmentEntry, ReadSegmentEntry, SegmentEntry};
 use segment::entry::snapshot_entry::SnapshotEntry as _;
 use segment::json_path::JsonPath;
 use segment::segment::Segment;
@@ -196,7 +196,7 @@ fn test_on_disk_segment_snapshot(#[case] format: SnapshotFormat) {
     assert_eq!(entry.file_name(), segment_id);
 
     let restored_segment =
-        load_segment(&entry.path(), Uuid::nil(), &AtomicBool::new(false)).unwrap();
+        load_segment(&entry.path(), Uuid::nil(), None, &AtomicBool::new(false)).unwrap();
 
     // validate restored snapshot is the same as original segment
     assert_eq!(

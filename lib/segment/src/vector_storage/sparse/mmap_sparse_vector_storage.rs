@@ -2,8 +2,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use bitvec::slice::BitSlice;
+use common::bitvec::BitSlice;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::generic_consts::AccessPattern;
 use common::iterator_ext::IteratorExt;
 use common::types::PointOffsetType;
 use fs_err as fs;
@@ -18,7 +19,7 @@ use crate::data_types::named_vectors::CowVector;
 use crate::data_types::vectors::VectorRef;
 use crate::types::VectorStorageDatatype;
 use crate::vector_storage::sparse::stored_sparse_vectors::StoredSparseVector;
-use crate::vector_storage::{AccessPattern, SparseVectorStorage, VectorStorage};
+use crate::vector_storage::{SparseVectorStorage, VectorStorage};
 
 const DELETED_DIRNAME: &str = "deleted";
 const STORAGE_DIRNAME: &str = "store";
@@ -148,7 +149,7 @@ impl MmapSparseVectorStorage {
             )?;
         } else {
             // delete vector
-            self.storage.delete_value(key);
+            self.storage.delete_value(key)?;
         }
 
         self.next_point_offset = std::cmp::max(self.next_point_offset, key as usize + 1);
@@ -182,14 +183,10 @@ impl SparseVectorStorage for MmapSparseVectorStorage {
         &self,
         key: PointOffsetType,
     ) -> OperationResult<Option<SparseVector>> {
-        let result = if P::IS_SEQUENTIAL {
-            self.storage
-                .get_value::<true>(key, &HardwareCounterCell::disposable()) // Vector storage read IO not measured
-        } else {
-            self.storage
-                .get_value::<false>(key, &HardwareCounterCell::disposable())
-        };
-        result.map(SparseVector::try_from).transpose()
+        self.storage
+            .get_value::<P>(key, &HardwareCounterCell::disposable())? // Vector storage read IO not measured
+            .map(SparseVector::try_from)
+            .transpose()
     }
 }
 
@@ -330,17 +327,18 @@ mod test {
     use std::path::{Path, PathBuf};
 
     use common::counter::hardware_counter::HardwareCounterCell;
+    use common::generic_consts::Random;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use sparse::common::sparse_vector;
     use sparse::common::sparse_vector_fixture::random_sparse_vector;
     use tempfile::Builder;
 
     use super::*;
+    use crate::vector_storage::VectorStorage;
     use crate::vector_storage::sparse::mmap_sparse_vector_storage::{
         MmapSparseVectorStorage, VectorRef,
     };
-    use crate::vector_storage::{Random, VectorStorage};
 
     const RAND_SEED: u64 = 42;
 

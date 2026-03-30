@@ -2,7 +2,7 @@ use std::cmp::max;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use bitvec::prelude::BitSlice;
+use common::bitvec::BitSlice;
 use common::counter::referenced_counter::HwMetricRefCounter;
 use common::fs::clear_disk_cache;
 use common::mmap::{
@@ -300,7 +300,7 @@ mod tests {
     use std::iter;
 
     use rand::prelude::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use tempfile::Builder;
 
     use super::*;

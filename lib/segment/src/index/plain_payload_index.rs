@@ -14,7 +14,7 @@ use super::field_index::FieldIndex;
 use super::payload_config::PayloadFieldSchemaWithIndexType;
 use crate::common::Flusher;
 use crate::common::operation_error::OperationResult;
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::PayloadConfig;
 use crate::index::{BuildIndexResult, PayloadIndex};
@@ -28,7 +28,7 @@ use crate::types::{Filter, Payload, PayloadFieldSchema, PayloadKeyType, PayloadK
 /// rather than spend time for index re-building
 pub struct PlainPayloadIndex {
     condition_checker: Arc<ConditionCheckerSS>,
-    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     config: PayloadConfig,
     path: PathBuf,
 }
@@ -45,7 +45,7 @@ impl PlainPayloadIndex {
 
     pub fn open(
         condition_checker: Arc<ConditionCheckerSS>,
-        id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+        id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
         path: &Path,
     ) -> OperationResult<Self> {
         fs::create_dir_all(path)?;
@@ -141,14 +141,14 @@ impl PayloadIndex for PlainPayloadIndex {
         &self,
         _query: &Filter,
         _hw_counter: &HardwareCounterCell, // No measurements needed here.
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         let available_points = self.id_tracker.borrow().available_point_count();
-        CardinalityEstimation {
+        Ok(CardinalityEstimation {
             primary_clauses: vec![],
             min: 0,
             exp: available_points / 2,
             max: available_points,
-        }
+        })
     }
 
     /// Forward to non nested implementation.
@@ -157,23 +157,25 @@ impl PayloadIndex for PlainPayloadIndex {
         query: &Filter,
         _nested_path: &JsonPath,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         self.estimate_cardinality(query, hw_counter)
     }
 
     fn query_points(
         &self,
-        query: &Filter,
+        filter: &Filter,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
-    ) -> Vec<PointOffsetType> {
-        let filter_context = self.filter_context(query, hw_counter);
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> OperationResult<Vec<PointOffsetType>> {
+        let filter_context = self.filter_context(filter, hw_counter)?;
         let id_tracker = self.id_tracker.borrow();
-        let all_points_iter = id_tracker.iter_internal();
-        all_points_iter
+        let point_mappings = id_tracker.point_mappings();
+        let all_points_iter = point_mappings.iter_internal_visible(deferred_internal_id);
+        Ok(all_points_iter
             .stop_if(is_stopped)
             .filter(|id| filter_context.check(*id))
-            .collect()
+            .collect())
     }
 
     fn indexed_points(&self, _field: PayloadKeyTypeRef) -> usize {
@@ -184,18 +186,18 @@ impl PayloadIndex for PlainPayloadIndex {
         &'a self,
         filter: &'a Filter,
         _: &HardwareCounterCell,
-    ) -> Box<dyn FilterContext + 'a> {
-        Box::new(PlainFilterContext {
+    ) -> OperationResult<Box<dyn FilterContext + 'a>> {
+        Ok(Box::new(PlainFilterContext {
             filter,
             condition_checker: self.condition_checker.clone(),
-        })
+        }))
     }
 
     fn payload_blocks(
         &self,
         _field: PayloadKeyTypeRef,
         _threshold: usize,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         // No blocks for un-indexed payload
         Box::new(std::iter::empty())
     }

@@ -12,8 +12,9 @@ use itertools::Itertools;
 use segment::common::operation_error::OperationError;
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, VectorRef, only_default_vector};
-use segment::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
-use segment::index::hnsw_index::num_rayon_threads;
+use segment::entry::entry_point::{NonAppendableSegmentEntry, ReadSegmentEntry, SegmentEntry};
+use segment::id_tracker::IdTracker;
+use segment::index::hnsw_index::get_num_indexing_threads;
 use segment::json_path::JsonPath;
 use segment::segment::Segment;
 use segment::segment_constructor::segment_builder::SegmentBuilder;
@@ -197,7 +198,7 @@ fn check_points_defragmented(
 
     let hw_counter = HardwareCounterCell::new();
 
-    for internal_id in id_tracker.iter_internal() {
+    for internal_id in id_tracker.point_mappings().iter_internal() {
         let external_id = id_tracker.external_id(internal_id).unwrap();
         let payload = segment.payload(external_id, &hw_counter).unwrap();
         let values = payload.get_value(defragment_key);
@@ -349,7 +350,7 @@ fn estimate_build_time(segment: &Segment, stop_delay_millis: Option<u64>) -> (u6
             .unwrap();
     }
 
-    let permit_cpu_count = num_rayon_threads(0);
+    let permit_cpu_count = get_num_indexing_threads(0);
     let permit = ResourcePermit::dummy(permit_cpu_count as u32);
     let hw_counter = HardwareCounterCell::new();
     let progress = ProgressTracker::new_for_test();
@@ -357,6 +358,7 @@ fn estimate_build_time(segment: &Segment, stop_delay_millis: Option<u64>) -> (u6
     let res = builder.build(
         dir.path(),
         Uuid::new_v4(),
+        None,
         permit,
         &stopped,
         &mut rng,
@@ -496,7 +498,9 @@ fn test_building_cancellation() {
     let late_stop_delay = time_baseline / 5;
     let (time_long, was_cancelled_later) = estimate_build_time(&segment_2, Some(late_stop_delay));
 
-    let acceptable_stopping_delay = 600; // millis
+    // Timing on CI (especially Windows) can be noisy due to scheduler delays.
+    // Keep a fixed lower bound but scale tolerance for slower baseline runs.
+    let acceptable_stopping_delay = std::cmp::max(600, time_baseline / 8); // millis
 
     assert!(was_cancelled_early);
     assert!(
@@ -508,6 +512,10 @@ fn test_building_cancellation() {
     assert!(
         time_long < late_stop_delay + acceptable_stopping_delay,
         "time_later: {time_long}, late_stop_delay: {late_stop_delay}"
+    );
+    assert!(
+        time_long < time_baseline,
+        "cancelled build should be faster than baseline: time_later={time_long}, baseline={time_baseline}",
     );
 
     assert!(

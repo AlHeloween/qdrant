@@ -13,9 +13,10 @@ use segment::data_types::vectors::{
     DEFAULT_VECTOR_NAME, MultiDenseVectorInternal, QueryVector, TypedMultiDenseVectorRef,
     VectorElementType, VectorRef, only_default_vector,
 };
-use segment::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
+use segment::entry::{NonAppendableSegmentEntry, SegmentEntry};
 use segment::fixtures::index_fixtures::random_vector;
 use segment::fixtures::payload_fixtures::random_int_payload;
+use segment::id_tracker::IdTracker;
 use segment::index::VectorIndex;
 use segment::index::hnsw_index::hnsw::{HNSWIndex, HnswIndexOpenArgs};
 use segment::json_path::JsonPath;

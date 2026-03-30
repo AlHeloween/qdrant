@@ -1055,6 +1055,9 @@ pub struct StrictModeConfig {
     /// Max batchsize when upserting
     #[prost(uint64, optional, tag = "9")]
     pub upsert_max_batchsize: ::core::option::Option<u64>,
+    /// Max batchsize when searching
+    #[prost(uint64, optional, tag = "20")]
+    pub search_max_batchsize: ::core::option::Option<u64>,
     /// Max size of a collections vector storage in bytes, ignoring replicas.
     #[prost(uint64, optional, tag = "10")]
     pub max_collection_vector_size_bytes: ::core::option::Option<u64>,
@@ -1620,6 +1623,9 @@ pub struct UpdateQueueInfo {
     /// Number of elements in the queue
     #[prost(uint64, tag = "1")]
     pub length: u64,
+    /// Number of points that are deferred (i.e hidden from search as they're not yet optimized).
+    #[prost(uint64, optional, tag = "2")]
+    pub deferred_points: ::core::option::Option<u64>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5533,11 +5539,11 @@ pub struct QuantizationSearchParams {
     pub rescore: ::core::option::Option<bool>,
     /// Oversampling factor for quantization.
     ///
-    /// Defines how many extra vectors should be pre-selected using quantized index,
+    /// Defines how many extra vectors should be preselected using quantized index,
     /// and then re-scored using original vectors.
     ///
     /// For example, if `oversampling` is 2.4 and `limit` is 100,
-    /// then 240 vectors will be pre-selected using quantized index,
+    /// then 240 vectors will be preselected using quantized index,
     /// and then top-100 will be returned after re-scoring.
     #[prost(double, optional, tag = "3")]
     #[validate(range(min = 1.0))]
@@ -10299,6 +10305,10 @@ pub struct SyncPointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10312,6 +10322,10 @@ pub struct UpsertPointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10325,6 +10339,10 @@ pub struct DeletePointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10338,6 +10356,10 @@ pub struct UpdateVectorsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10351,6 +10373,10 @@ pub struct DeleteVectorsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10364,6 +10390,10 @@ pub struct SetPayloadPointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10377,6 +10407,10 @@ pub struct DeletePayloadPointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10390,6 +10424,10 @@ pub struct ClearPayloadPointsInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10405,6 +10443,10 @@ pub struct CreateFieldIndexCollectionInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10420,6 +10462,10 @@ pub struct DeleteFieldIndexCollectionInternal {
     pub shard_id: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "3")]
     pub clock_tag: ::core::option::Option<ClockTag>,
+    /// When present, overrides the `wait` parameter of the wrapped public message.
+    /// When absent, falls back to `wait` (backward compatible with older nodes).
+    #[prost(enumeration = "WaitUntil", optional, tag = "4")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]
@@ -10471,6 +10517,10 @@ pub struct UpdateBatchInternal {
     #[prost(message, repeated, tag = "1")]
     #[validate(nested)]
     pub operations: ::prost::alloc::vec::Vec<UpdateOperation>,
+    /// When present, overrides the `wait` parameter for all operations in the batch.
+    /// Propagated to individual operations if not already set.
+    #[prost(enumeration = "WaitUntil", optional, tag = "2")]
+    pub wait_override: ::core::option::Option<i32>,
 }
 /// Has to be backward compatible with `PointsOperationResponse`!
 #[derive(serde::Serialize)]
@@ -11046,6 +11096,42 @@ pub struct FacetResponseInternal {
     pub time: f64,
     #[prost(message, optional, tag = "3")]
     pub usage: ::core::option::Option<HardwareUsage>,
+}
+/// Controls how an update operation waits for completion.
+/// When present, fully overrides the `wait` boolean from the wrapped public message.
+/// When absent, the `wait` boolean is used (backward compatible with older nodes).
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum WaitUntil {
+    /// Wait until the operation is written in WAL (equivalent to wait=false).
+    Wal = 0,
+    /// Wait until the operation is written in a segment (but not necessarily visible).
+    Segment = 1,
+    /// Wait until the operation is visible in search results (equivalent to wait=true).
+    Visible = 2,
+}
+impl WaitUntil {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            WaitUntil::Wal => "Wal",
+            WaitUntil::Segment => "Segment",
+            WaitUntil::Visible => "Visible",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "Wal" => Some(Self::Wal),
+            "Segment" => Some(Self::Segment),
+            "Visible" => Some(Self::Visible),
+            _ => None,
+        }
+    }
 }
 /// Generated client implementations.
 pub mod points_internal_client {
@@ -13212,6 +13298,34 @@ pub struct WaitOnConsensusCommitResponse {
     #[prost(bool, tag = "1")]
     pub ok: bool,
 }
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetAuditLogRequest {
+    /// ISO-8601 start time (inclusive), omit for no lower bound
+    #[prost(string, optional, tag = "1")]
+    pub time_from: ::core::option::Option<::prost::alloc::string::String>,
+    /// ISO-8601 end time (exclusive), omit for no upper bound
+    #[prost(string, optional, tag = "2")]
+    pub time_to: ::core::option::Option<::prost::alloc::string::String>,
+    /// Key=value filters applied to every JSON field
+    #[prost(map = "string, string", tag = "3")]
+    pub filters: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// Maximum number of entries to return
+    #[prost(uint64, tag = "4")]
+    pub limit: u64,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetAuditLogResponse {
+    /// Audit log entries as raw JSON strings (one per entry)
+    #[prost(string, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// Generated client implementations.
 pub mod qdrant_internal_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
@@ -13377,6 +13491,32 @@ pub mod qdrant_internal_client {
                 .insert(GrpcMethod::new("qdrant.QdrantInternal", "GetTelemetry"));
             self.inner.unary(req, path, codec).await
         }
+        /// Get audit log entries from this peer
+        pub async fn get_audit_log(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAuditLogRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAuditLogResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/qdrant.QdrantInternal/GetAuditLog",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("qdrant.QdrantInternal", "GetAuditLog"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -13408,6 +13548,14 @@ pub mod qdrant_internal_server {
             request: tonic::Request<super::GetTelemetryRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetTelemetryResponse>,
+            tonic::Status,
+        >;
+        /// Get audit log entries from this peer
+        async fn get_audit_log(
+            &self,
+            request: tonic::Request<super::GetAuditLogRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAuditLogResponse>,
             tonic::Status,
         >;
     }
@@ -13618,6 +13766,52 @@ pub mod qdrant_internal_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetTelemetrySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/qdrant.QdrantInternal/GetAuditLog" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAuditLogSvc<T: QdrantInternal>(pub Arc<T>);
+                    impl<
+                        T: QdrantInternal,
+                    > tonic::server::UnaryService<super::GetAuditLogRequest>
+                    for GetAuditLogSvc<T> {
+                        type Response = super::GetAuditLogResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetAuditLogRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as QdrantInternal>::get_audit_log(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetAuditLogSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

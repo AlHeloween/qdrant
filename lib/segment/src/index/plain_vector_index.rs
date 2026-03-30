@@ -14,7 +14,7 @@ use crate::common::operation_time_statistics::{
 };
 use crate::data_types::query_context::VectorQueryContext;
 use crate::data_types::vectors::{QueryVector, VectorRef};
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::struct_payload_index::StructPayloadIndex;
 use crate::index::vector_index_search_common::{
     get_oversampled_top, is_quantized_search, postprocess_search_result,
@@ -27,7 +27,7 @@ use crate::vector_storage::{VectorStorage, VectorStorageEnum};
 
 #[derive(Debug)]
 pub struct PlainVectorIndex {
-    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     quantized_vectors: Arc<AtomicRefCell<Option<QuantizedVectors>>>,
     payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
@@ -37,7 +37,7 @@ pub struct PlainVectorIndex {
 
 impl PlainVectorIndex {
     pub fn new(
-        id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+        id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
         vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
         quantized_vectors: Arc<AtomicRefCell<Option<QuantizedVectors>>>,
         payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
@@ -57,11 +57,11 @@ impl PlainVectorIndex {
         search_optimized_threshold_kb: usize,
         filter: Option<&Filter>,
         hw_counter: &HardwareCounterCell,
-    ) -> bool {
+    ) -> OperationResult<bool> {
         let vector_storage = self.vector_storage.borrow();
         let available_vector_count = vector_storage.available_vector_count();
         if available_vector_count == 0 {
-            return true;
+            return Ok(true);
         }
 
         let vector_size_bytes =
@@ -70,12 +70,12 @@ impl PlainVectorIndex {
 
         if let Some(payload_filter) = filter {
             let payload_index = self.payload_index.borrow();
-            let cardinality = payload_index.estimate_cardinality(payload_filter, hw_counter);
+            let cardinality = payload_index.estimate_cardinality(payload_filter, hw_counter)?;
             let scan_size = vector_size_bytes.saturating_mul(cardinality.max);
-            scan_size <= indexing_threshold_bytes
+            Ok(scan_size <= indexing_threshold_bytes)
         } else {
             let vector_storage_size = vector_size_bytes.saturating_mul(available_vector_count);
-            vector_storage_size <= indexing_threshold_bytes
+            Ok(vector_storage_size <= indexing_threshold_bytes)
         }
     }
 }
@@ -95,7 +95,7 @@ impl VectorIndex for PlainVectorIndex {
                 query_context.search_optimized_threshold_kb(),
                 filter,
                 &query_context.hardware_counter(),
-            )
+            )?
         {
             return Ok(vec![vec![]; query_vectors.len()]);
         }
@@ -133,13 +133,20 @@ impl VectorIndex for PlainVectorIndex {
             query_context.hardware_counter(),
         )?;
 
+        let deferred_internal_id = query_context.deferred_internal_id();
+
         let mut search_results = match filter {
             Some(filter) => {
                 let payload_index = self.payload_index.borrow();
-                let filtered_ids_vec = payload_index.query_points(filter, &hw_counter, &is_stopped);
-                batch_searcher.peek_top_iter(&mut filtered_ids_vec.iter().copied(), &is_stopped)?
+                let filtered_ids_vec = payload_index.query_points(
+                    filter,
+                    &hw_counter,
+                    &is_stopped,
+                    deferred_internal_id,
+                )?;
+                batch_searcher.peek_top_iter(filtered_ids_vec.iter().copied(), &is_stopped)?
             }
-            None => batch_searcher.peek_top_all(&is_stopped)?,
+            None => batch_searcher.peek_top_all(&is_stopped, deferred_internal_id)?,
         };
 
         for (search_result, query_vector) in search_results.iter_mut().zip(query_vectors) {

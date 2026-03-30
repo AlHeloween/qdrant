@@ -1,3 +1,4 @@
+pub mod optimization;
 pub mod payload_ops;
 pub mod point_ops;
 #[cfg(feature = "staging")]
@@ -170,6 +171,7 @@ impl ClockTag {
     }
 }
 
+#[cfg(feature = "api")]
 impl From<api::grpc::qdrant::ClockTag> for ClockTag {
     fn from(tag: api::grpc::qdrant::ClockTag) -> Self {
         let api::grpc::qdrant::ClockTag {
@@ -189,6 +191,7 @@ impl From<api::grpc::qdrant::ClockTag> for ClockTag {
     }
 }
 
+#[cfg(feature = "api")]
 impl From<ClockTag> for api::grpc::qdrant::ClockTag {
     fn from(tag: ClockTag) -> Self {
         let ClockTag {
@@ -336,6 +339,7 @@ mod tests {
             let delete = Self::DeleteVectors(
                 PointIdsList {
                     points: Vec::new(),
+                    #[cfg(feature = "api")]
                     shard_key: None,
                 },
                 Vec::new(),
@@ -414,5 +418,57 @@ mod tests {
 
             prop_oneof![Just(create), Just(delete),].boxed()
         }
+    }
+
+    #[test]
+    fn test_delete_by_filter_with_has_id_uuids_cbor_roundtrip() {
+        let uuids: Vec<PointIdType> = vec![ExtendedPointId::Uuid(
+            uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap(),
+        )];
+
+        let filter = Filter {
+            should: None,
+            min_should: None,
+            must: None,
+            must_not: Some(vec![Condition::HasId(HasIdCondition::from(
+                uuids.into_iter().collect::<ahash::AHashSet<_>>(),
+            ))]),
+        };
+
+        let operation = CollectionUpdateOperations::PointOperation(
+            PointOperations::DeletePointsByFilter(filter),
+        );
+
+        let cbor_bytes = serde_cbor::to_vec(&operation).unwrap();
+        let deserialized: CollectionUpdateOperations = serde_cbor::from_slice(&cbor_bytes).unwrap();
+
+        assert_eq!(operation, deserialized);
+    }
+
+    #[test]
+    fn test_wal_roundtrip_delete_by_filter_with_has_id_uuids() {
+        use crate::wal::WalRawRecord;
+
+        let uuids: Vec<PointIdType> = vec![ExtendedPointId::Uuid(
+            uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap(),
+        )];
+
+        let filter = Filter {
+            should: None,
+            min_should: None,
+            must: None,
+            must_not: Some(vec![Condition::HasId(HasIdCondition::from(
+                uuids.into_iter().collect::<ahash::AHashSet<_>>(),
+            ))]),
+        };
+
+        let operation = CollectionUpdateOperations::PointOperation(
+            PointOperations::DeletePointsByFilter(filter),
+        );
+
+        let raw = WalRawRecord::new(&operation).unwrap();
+        let deserialized: CollectionUpdateOperations = raw.deserialize().unwrap();
+
+        assert_eq!(operation, deserialized);
     }
 }

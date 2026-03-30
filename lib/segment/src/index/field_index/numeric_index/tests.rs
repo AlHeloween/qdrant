@@ -1,7 +1,7 @@
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use itertools::Itertools;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rstest::rstest;
 use tempfile::{Builder, TempDir};
 
@@ -166,6 +166,7 @@ fn cardinality_request(
             &hw_counter,
         )
         .unwrap()
+        .unwrap()
         .unique()
         .collect_vec();
 
@@ -283,6 +284,7 @@ fn test_payload_blocks(#[case] index_type: IndexType) {
     let blocks = index
         .inner()
         .payload_blocks(threshold, JsonPath::new("test"))
+        .map(Result::unwrap)
         .collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
@@ -291,6 +293,7 @@ fn test_payload_blocks(#[case] index_type: IndexType) {
     let blocks = index
         .inner()
         .payload_blocks(threshold, JsonPath::new("test"))
+        .map(Result::unwrap)
         .collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
@@ -299,6 +302,7 @@ fn test_payload_blocks(#[case] index_type: IndexType) {
     let blocks = index
         .inner()
         .payload_blocks(threshold, JsonPath::new("test"))
+        .map(Result::unwrap)
         .collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
@@ -307,6 +311,7 @@ fn test_payload_blocks(#[case] index_type: IndexType) {
     let blocks = index
         .inner()
         .payload_blocks(threshold, JsonPath::new("test"))
+        .map(Result::unwrap)
         .collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
@@ -347,6 +352,7 @@ fn test_payload_blocks_small(#[case] index_type: IndexType) {
     let blocks = index
         .inner()
         .payload_blocks(threshold, JsonPath::new("test"))
+        .map(Result::unwrap)
         .collect_vec();
     assert!(!blocks.is_empty());
 }
@@ -584,7 +590,7 @@ fn test_numeric_index(#[case] index_type: IndexType) {
 }
 
 fn test_cond<
-    T: Encodable + Numericable + PartialOrd + Clone + MmapValue + Send + Sync + Default + 'static,
+    T: Encodable + Numericable + PartialOrd + Clone + StoredValue + Send + Sync + Default + 'static,
 >(
     index: &NumericIndexInner<T>,
     rng: Range<FloatPayloadType>,
@@ -602,7 +608,11 @@ fn test_cond<
     let condition = FieldCondition::new_range(JsonPath::new("unused"), ordered_range);
     let hw_acc = HwMeasurementAcc::new();
     let hw_counter = hw_acc.get_counter_cell();
-    let offsets = index.filter(&condition, &hw_counter).unwrap().collect_vec();
+    let offsets = index
+        .filter(&condition, &hw_counter)
+        .unwrap()
+        .unwrap()
+        .collect_vec();
     assert_eq!(offsets, result);
 }
 

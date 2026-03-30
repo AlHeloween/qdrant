@@ -10,13 +10,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ahash::AHashSet;
+use bytemuck::{Pod, Zeroable};
 use common::stable_hash::StableHash;
-use common::types::ScoreType;
+use common::types::{PointOffsetType, ScoreType};
 use ecow::EcoString;
 use fnv::FnvBuildHasher;
 use geo::{Contains, Coord, Distance as GeoDistance, Haversine, LineString, Point, Polygon};
 use indexmap::IndexSet;
 use itertools::Itertools;
+use num_derive::FromPrimitive;
 use ordered_float::OrderedFloat;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -249,10 +251,11 @@ impl<'de> serde::Deserialize<'de> for ExtendedPointId {
             return Ok(ExtendedPointId::Uuid(uuid));
         }
 
+        let value = crate::utils::fmt::SerdeValue(&value);
+
         Err(serde::de::Error::custom(format!(
-            "value {} is not a valid point ID, \
+            "value {value} is not a valid point ID, \
                  valid values are either an unsigned integer or a UUID",
-            crate::utils::fmt::SerdeValue(&value),
         )))
     }
 }
@@ -469,6 +472,8 @@ pub struct SegmentInfo {
     pub segment_type: SegmentType,
     pub num_vectors: usize,
     pub num_points: usize,
+    pub num_deferred_points: Option<usize>,
+    pub num_deleted_deferred_points: Option<usize>,
     pub num_indexed_vectors: usize,
     pub num_deleted_vectors: usize,
     /// An ESTIMATION of effective amount of bytes used for vectors
@@ -481,6 +486,11 @@ pub struct SegmentInfo {
     pub is_appendable: bool,
     pub index_schema: HashMap<PayloadKeyType, PayloadIndexInfo>,
     pub vector_data: HashMap<String, VectorDataInfo>,
+    /// Internal ID from which points are deferred (hidden from reads).
+    /// Only set for appendable segments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[anonymize(false)]
+    pub deferred_internal_id: Option<PointOffsetType>,
 }
 
 #[derive(Debug, Default)]
@@ -509,10 +519,10 @@ pub struct QuantizationSearchParams {
 
     /// Oversampling factor for quantization. Default is 1.0.
     ///
-    /// Defines how many extra vectors should be pre-selected using quantized index,
+    /// Defines how many extra vectors should be preselected using quantized index,
     /// and then re-scored using original vectors.
     ///
-    /// For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will be pre-selected using quantized index,
+    /// For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will be preselected using quantized index,
     /// and then top-100 will be returned after re-scoring.
     #[serde(default = "default_quantization_oversampling_value")]
     #[validate(range(min = 1.0))]
@@ -868,6 +878,14 @@ pub enum QuantizationConfig {
 }
 
 impl QuantizationConfig {
+    /// If appendable_quantization feature is enabled and config supports appendable segments,
+    /// returns the config for use in appendable segment; otherwise `None`.
+    pub fn for_appendable_segment(opt: Option<&Self>) -> Option<Self> {
+        let appendable = common::flags::feature_flags().appendable_quantization;
+        opt.filter(|q| appendable && q.supports_appendable())
+            .cloned()
+    }
+
     /// Detect configuration mismatch against `other` that requires rebuilding
     ///
     /// Returns true only if both conditions are met:
@@ -1067,6 +1085,10 @@ pub struct StrictModeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upsert_max_batchsize: Option<usize>,
 
+    /// Max batchsize when searching
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_max_batchsize: Option<usize>,
+
     /// Max size of a collections vector storage in bytes, ignoring replicas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_collection_vector_size_bytes: Option<usize>,
@@ -1129,6 +1151,7 @@ impl Hash for StrictModeConfig {
             // We skip hashing this field because we cannot reliably hash a float
             search_max_oversampling: _,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -1148,6 +1171,7 @@ impl Hash for StrictModeConfig {
         search_max_hnsw_ef.hash(state);
         search_allow_exact.hash(state);
         upsert_max_batchsize.hash(state);
+        search_max_batchsize.hash(state);
         max_collection_vector_size_bytes.hash(state);
         read_rate_limit.hash(state);
         write_rate_limit.hash(state);
@@ -1208,6 +1232,10 @@ pub struct StrictModeConfigOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[anonymize(false)]
     pub upsert_max_batchsize: Option<usize>,
+    /// Max batchsize when searching
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[anonymize(false)]
+    pub search_max_batchsize: Option<usize>,
 
     /// Max size of a collections vector storage in bytes, ignoring replicas.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1270,6 +1298,7 @@ impl From<StrictModeConfig> for StrictModeConfigOutput {
             search_allow_exact,
             search_max_oversampling,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -1292,6 +1321,7 @@ impl From<StrictModeConfig> for StrictModeConfigOutput {
             search_allow_exact,
             search_max_oversampling,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -1353,6 +1383,12 @@ impl Default for PayloadStorageType {
 }
 
 impl PayloadStorageType {
+    /// Convert user-facing `on_disk_payload` (true = store on disk) to storage type.
+    /// Returns `Mmap` or `InRamMmap`; for RocksDB-backed variants use collection config.
+    pub fn from_on_disk_payload(on_disk: bool) -> Self {
+        if on_disk { Self::Mmap } else { Self::InRamMmap }
+    }
+
     pub fn is_on_disk(&self) -> bool {
         match self {
             #[cfg(feature = "rocksdb")]
@@ -1436,7 +1472,7 @@ impl SegmentConfig {
             .all(|v| v)
     }
 
-    pub fn is_compatible(&self, other: &Self) -> bool {
+    pub fn check_compatible(&self, other: &Self) -> Result<(), String> {
         // Vector data have to be compatible between two segments.
         // Sparse vector data can be different, but a placeholder check is implemented to catch
         // and enforce compatibility check for future changes.
@@ -1449,42 +1485,50 @@ impl SegmentConfig {
             payload_storage_type: _,
         } = self;
 
-        let is_vector_config_compatible = is_map_compatible(
+        check_vectors_map_compatible(
             &self.vector_data,
             &other.vector_data,
-            VectorDataConfig::is_compatible,
-        );
+            VectorDataConfig::check_compatible,
+        )?;
 
-        let is_sparse_vector_config_compatible = is_map_compatible(
+        check_vectors_map_compatible(
             &self.sparse_vector_data,
             &other.sparse_vector_data,
-            SparseVectorDataConfig::is_compatible,
-        );
+            SparseVectorDataConfig::check_compatible,
+        )?;
 
-        is_vector_config_compatible && is_sparse_vector_config_compatible
+        Ok(())
     }
 }
 
-fn is_map_compatible<V, C, F>(this: &HashMap<V, C>, other: &HashMap<V, C>, check: F) -> bool
+fn check_vectors_map_compatible<C, F>(
+    this: &HashMap<String, C>,
+    other: &HashMap<String, C>,
+    check: F,
+) -> Result<(), String>
 where
-    V: Eq + Hash,
-    F: Fn(&C, &C) -> bool,
+    F: Fn(&C, &C) -> Result<(), String>,
 {
     if this.len() != other.len() {
-        return false;
+        let expected_keys: Vec<String> = this.keys().map(|k| format!("{k:?}")).collect();
+        let actual_keys: Vec<String> = other.keys().map(|k| format!("{k:?}")).collect();
+        return Err(format!(
+            "Incompatible configs: expected vector storages with keys {expected_keys:?}, but got {actual_keys:?}"
+        ));
     }
 
     for (vector_name, config) in this {
         let Some(other_config) = other.get(vector_name) else {
-            return false;
+            return Err(format!(
+                "Incompatible configs: expected vector storage with key {vector_name:?} not found in other config"
+            ));
         };
 
-        if !check(config, other_config) {
-            return false;
-        }
+        check(config, other_config)
+            .map_err(|err| format!("Incompatible config for vector {vector_name:?}: {err}"))?;
     }
 
-    true
+    Ok(())
 }
 
 /// Storage types for vectors
@@ -1545,13 +1589,18 @@ pub struct MultiVectorConfig {
 }
 
 impl MultiVectorConfig {
-    fn is_compatible(&self, other: &Self) -> bool {
-        // TODO: Does comparator have to be same for two segments to be compatible? 🤔
-
+    fn check_compatible(&self, other: &Self) -> Result<(), String> {
         // Assert multi-vector config fields
-        let Self { comparator: _ } = self;
+        let Self { comparator } = self;
 
-        self.comparator == other.comparator // TODO: 🤔
+        if *comparator != other.comparator {
+            return Err(format!(
+                "Incompatible configs: expected multi-vector comparator {comparator:?}, but got {other_comparator:?}",
+                other_comparator = other.comparator
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1565,6 +1614,16 @@ pub enum MultiVectorComparator {
 }
 
 impl VectorStorageType {
+    /// Convert user-facing `on_disk` (true = store on disk) to appendable vector storage type.
+    /// Returns `ChunkedMmap` or `InRamChunkedMmap`.
+    pub fn from_on_disk(on_disk: bool) -> Self {
+        if on_disk {
+            Self::ChunkedMmap
+        } else {
+            Self::InRamChunkedMmap
+        }
+    }
+
     /// Whether this storage type is a mmap on disk
     pub fn is_on_disk(&self) -> bool {
         match self {
@@ -1615,39 +1674,57 @@ impl VectorDataConfig {
         is_index_appendable && is_storage_appendable
     }
 
-    pub fn is_compatible(&self, other: &Self) -> bool {
+    pub fn check_compatible(&self, other: &Self) -> Result<(), String> {
         // Size and distance have to be the same for both segments.
         // Storage type, index and quantization config can be different.
         //
-        // TODO: Can multivector config and datatype be different?
-
         // Assert vector data config fields
         let Self {
-            size: _,
-            distance: _,
+            size,
+            distance,
             storage_type: _,
             index: _,
             quantization_config: _,
-            multivector_config: _,
-            datatype: _,
+            multivector_config,
+            datatype,
         } = self;
 
-        self.size == other.size
-            && self.distance == other.distance
-            && self.datatype == other.datatype // TODO: 🤔
-            && is_opt_compatible(
-                self.multivector_config.as_ref(),
-                other.multivector_config.as_ref(),
-                MultiVectorConfig::is_compatible,
-            )
-    }
-}
+        if *size != other.size {
+            return Err(format!(
+                "Incompatible configs: expected vector size {size}, but got {other_size}",
+                other_size = other.size
+            ));
+        }
 
-fn is_opt_compatible<T, F: Fn(T, T) -> bool>(this: Option<T>, other: Option<T>, check: F) -> bool {
-    match (this, other) {
-        (Some(this), Some(other)) => check(this, other),
-        (None, None) => true,
-        _ => false,
+        if *distance != other.distance {
+            return Err(format!(
+                "Incompatible configs: expected distance {distance:?}, but got {other_distance:?}",
+                other_distance = other.distance
+            ));
+        }
+
+        let left_datatype = datatype.unwrap_or(VectorStorageDatatype::Float32);
+        let right_datatype = other.datatype.unwrap_or(VectorStorageDatatype::Float32);
+        if left_datatype != right_datatype {
+            return Err(format!(
+                "Incompatible configs: expected vector storage datatype {left_datatype:?}, but got {right_datatype:?}",
+            ));
+        }
+
+        match (multivector_config, &other.multivector_config) {
+            (None, None) => {}
+            (Some(this), Some(other)) => {
+                MultiVectorConfig::check_compatible(this, other)?;
+            }
+            _ => {
+                return Err(format!(
+                    "Incompatible configs: expected multivector config {this_multivector_config:?}, but got {other_multivector_config:?}",
+                    this_multivector_config = multivector_config,
+                    other_multivector_config = other.multivector_config
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1713,7 +1790,7 @@ impl SparseVectorDataConfig {
         true
     }
 
-    pub fn is_compatible(&self, other: &Self) -> bool {
+    pub fn check_compatible(&self, other: &Self) -> Result<(), String> {
         // Both index and storage type can be different for two segments to be compatible
 
         // Assert sparse vector config fields
@@ -1723,7 +1800,14 @@ impl SparseVectorDataConfig {
             modifier,
         } = self;
 
-        modifier == &other.modifier
+        if modifier != &other.modifier {
+            return Err(format!(
+                "Incompatible configs: expected sparse vector modifier {modifier:?}, but got {other_modifier:?}",
+                other_modifier = other.modifier
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1758,8 +1842,11 @@ pub type RawGeoPoint = (f64, f64);
     Default,
     PartialOrd,
     Ord,
+    Pod,
+    Zeroable,
 )]
 #[serde(try_from = "GeoPointShadow")]
+#[repr(C)]
 pub struct GeoPoint {
     pub lon: OrderedFloat<f64>,
     pub lat: OrderedFloat<f64>,
@@ -3346,26 +3433,29 @@ impl<'de> serde::Deserialize<'de> for Condition {
     where
         D: serde::Deserializer<'de>,
     {
-        if deserializer.is_human_readable() {
-            let value = serde_json::Value::deserialize(deserializer)?;
+        // Buffer into serde_value::Value which, unlike serde_json::Value,
+        // can represent byte arrays from non-human-readable formats (e.g. CBOR).
+        // Note: we cannot rely on `deserializer.is_human_readable()` here because
+        // serde's internal ContentDeserializer (used by flatten + untagged) always
+        // reports `true` regardless of the original format.
+        let value = serde_value::Value::deserialize(deserializer)?;
 
-            // Special case: FieldCondition first to surface datetime parse errors.
-            // Untagged enum would swallow these errors with generic message.
-            if let Some(obj) = value.as_object()
-                && obj.contains_key("key")
-            {
-                return serde_json::from_value::<FieldCondition>(value)
-                    .map(Condition::Field)
-                    .map_err(serde::de::Error::custom);
-            }
-
-            // All other variants handled by ConditionUntagged (compiler-safe)
-            serde_json::from_value::<ConditionUntagged>(value)
-                .map(Condition::from)
-                .map_err(serde::de::Error::custom)
-        } else {
-            ConditionUntagged::deserialize(deserializer).map(Condition::from)
+        // Special case: FieldCondition first to surface datetime parse errors.
+        // Untagged enum would swallow these errors with generic message.
+        if let serde_value::Value::Map(obj) = &value
+            && obj.contains_key(&serde_value::Value::String("key".into()))
+        {
+            return value
+                .deserialize_into()
+                .map(Condition::Field)
+                .map_err(serde::de::Error::custom);
         }
+
+        // All other variants handled by ConditionUntagged (compiler-safe)
+        value
+            .deserialize_into::<ConditionUntagged>()
+            .map(Condition::from)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -4160,20 +4250,20 @@ mod tests {
             .sorted_by_key(|(_, dt)| dt.timestamp())
             .collect();
 
-        sorted_datetimes.windows(2).for_each(|pair| {
-            let (i1, dt1) = pair[0];
-            let (i2, dt2) = pair[1];
-            assert!(
-                i1 < i2,
-                "i1: {}, dt1: {}, ts1: {}\ni2: {}, dt2: {}, ts2: {}",
-                i1,
-                dt1.0,
-                dt1.timestamp(),
-                i2,
-                dt2.0,
-                dt2.timestamp()
-            );
-        });
+        sorted_datetimes
+            .array_windows()
+            .for_each(|[(i1, dt1), (i2, dt2)]| {
+                assert!(
+                    i1 < i2,
+                    "i1: {}, dt1: {}, ts1: {}\ni2: {}, dt2: {}, ts2: {}",
+                    i1,
+                    dt1.0,
+                    dt1.timestamp(),
+                    i2,
+                    dt2.0,
+                    dt2.timestamp()
+                );
+            });
     }
 
     #[test]
@@ -5195,6 +5285,37 @@ mod tests {
             }
         };
         assert_eq!(payload, expected);
+    }
+
+    #[test]
+    fn test_extended_point_id_cbor_roundtrip() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        for point_id in [ExtendedPointId::Uuid(uuid), ExtendedPointId::NumId(42)] {
+            let cbor_bytes = serde_cbor::to_vec(&point_id).unwrap();
+            let deserialized: ExtendedPointId = serde_cbor::from_slice(&cbor_bytes).unwrap();
+            assert_eq!(point_id, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_filter_with_match_and_has_id_uuid_cbor_roundtrip() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let filter = Filter {
+            should: None,
+            min_should: None,
+            must: Some(vec![Condition::Field(FieldCondition::new_match(
+                crate::json_path::JsonPath::new("org_id"),
+                Match::new_value(ValueVariants::String("test_org".to_string())),
+            ))]),
+            must_not: Some(vec![Condition::HasId(HasIdCondition {
+                has_id: [ExtendedPointId::Uuid(uuid)].into_iter().collect(),
+            })]),
+        };
+
+        let cbor_bytes = serde_cbor::to_vec(&filter).unwrap();
+        let deserialized: Filter = serde_cbor::from_slice(&cbor_bytes).unwrap();
+        assert_eq!(filter, deserialized);
     }
 }
 

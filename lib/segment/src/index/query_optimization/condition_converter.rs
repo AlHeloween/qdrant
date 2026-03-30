@@ -8,6 +8,7 @@ use match_converter::get_match_checkers;
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 
+use crate::id_tracker::IdTracker;
 use crate::index::field_index::FieldIndex;
 use crate::index::field_index::null_index::MutableNullIndex;
 use crate::index::query_optimization::optimized_filter::ConditionCheckerFn;
@@ -185,6 +186,7 @@ impl StructPayloadIndex {
             }
             Condition::CustomIdChecker(cond) => {
                 let segment_ids: AHashSet<_> = id_tracker
+                    .point_mappings()
                     .iter_external()
                     .filter(|&point_id| cond.0.check(point_id))
                     .filter_map(|external_id| id_tracker.internal_id(external_id))

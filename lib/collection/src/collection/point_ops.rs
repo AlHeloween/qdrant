@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
+use common::types::DeferredBehavior;
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt as _, TryFutureExt, TryStreamExt as _, future};
 use itertools::Itertools;
@@ -19,6 +20,7 @@ use crate::operations::shard_selector_internal::ShardSelectorInternal;
 use crate::operations::types::*;
 use crate::operations::{CollectionUpdateOperations, OperationWithClockTag};
 use crate::shards::shard::ShardId;
+use crate::shards::shard_trait::WaitUntil;
 
 impl Collection {
     /// Apply collection update operation to all local shards.
@@ -30,7 +32,7 @@ impl Collection {
     pub async fn update_all_local(
         &self,
         operation: CollectionUpdateOperations,
-        wait: bool,
+        wait: WaitUntil,
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Option<UpdateResult>> {
         let shard_holder = self.shards_holder.clone().read_owned().await;
@@ -92,7 +94,7 @@ impl Collection {
         &self,
         operation: OperationWithClockTag,
         shard_selection: ShardId,
-        wait: bool,
+        wait: WaitUntil,
         timeout: Option<Duration>,
         ordering: WriteOrdering,
         hw_measurement_acc: HwMeasurementAcc,
@@ -141,7 +143,7 @@ impl Collection {
     pub async fn update_from_client(
         &self,
         operation: CollectionUpdateOperations,
-        wait: bool,
+        wait: WaitUntil,
         timeout: Option<Duration>,
         ordering: WriteOrdering,
         shard_keys_selection: Option<ShardKey>,
@@ -292,8 +294,15 @@ impl Collection {
         ordering: WriteOrdering,
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<UpdateResult> {
-        self.update_from_client(operation, wait, timeout, ordering, None, hw_measurement_acc)
-            .await
+        self.update_from_client(
+            operation,
+            WaitUntil::from(wait),
+            timeout,
+            ordering,
+            None,
+            hw_measurement_acc,
+        )
+        .await
     }
 
     pub async fn scroll_by(
@@ -419,6 +428,7 @@ impl Collection {
                     timeout,
                     shard_selection.is_shard_id(),
                     hw_measurement_acc.clone(),
+                    DeferredBehavior::Exclude,
                 )
             })
             .collect();

@@ -34,11 +34,16 @@ impl PartialOrd for ScoredPointOffset {
 pub struct TelemetryDetail {
     pub level: DetailsLevel,
     pub histograms: bool,
+    pub per_collection: bool,
 }
 
 impl TelemetryDetail {
     pub fn new(level: DetailsLevel, histograms: bool) -> Self {
-        Self { level, histograms }
+        Self {
+            level,
+            histograms,
+            per_collection: false,
+        }
     }
 }
 
@@ -76,6 +81,7 @@ impl Default for TelemetryDetail {
         TelemetryDetail {
             level: DetailsLevel::Level0,
             histograms: false,
+            per_collection: false,
         }
     }
 }
@@ -90,5 +96,51 @@ impl From<usize> for DetailsLevel {
             4 => DetailsLevel::Level4,
             _ => DetailsLevel::Level4,
         }
+    }
+}
+
+/// Tweaks the filtering of deferred points.
+/// Can be used in places where we sometimes must access all points, including deferred ones.
+#[derive(Clone, Copy)]
+pub enum DeferredBehavior {
+    /// Deferred points are not affected nor visible.
+    Exclude,
+
+    /// Deferred points are affected and visible.
+    IncludeAll,
+}
+
+impl DeferredBehavior {
+    /// Apply the behavior to a given `deferred_internal_id`.
+    pub fn apply(&self, deferred_internal_id: Option<PointOffsetType>) -> Option<PointOffsetType> {
+        match self {
+            // Excluding deferred points from the result, if `deferred_internal_id` is set.
+            DeferredBehavior::Exclude => deferred_internal_id,
+
+            // Setting `deferred_internal_id` to `None` results in no points being left out
+            // at deferred-point filtering.
+            DeferredBehavior::IncludeAll => None,
+        }
+    }
+
+    /// Returns `true` if filtering deferred points should be disabled
+    /// and *all* points should be included in the result.
+    pub fn include_all_points(&self) -> bool {
+        matches!(self, DeferredBehavior::IncludeAll)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_deferred_overwrite() {
+        assert_eq!(DeferredBehavior::Exclude.apply(Some(32)), Some(32));
+        assert_eq!(DeferredBehavior::Exclude.apply(None), None);
+
+        // `IncludeAll` always returns `None` because then the filtering of deferred points is disabled.
+        assert_eq!(DeferredBehavior::IncludeAll.apply(Some(32)), None);
+        assert_eq!(DeferredBehavior::IncludeAll.apply(None), None);
     }
 }

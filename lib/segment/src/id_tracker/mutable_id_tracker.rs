@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use bitvec::prelude::{BitSlice, BitVec};
 use byteorder::{ReadBytesExt, WriteBytesExt};
+use common::bitvec::{BitSlice, BitVec};
 use common::fs::OneshotFile;
 use common::is_alive_lock::IsAliveLock;
 use common::types::PointOffsetType;
@@ -19,7 +19,7 @@ use super::point_mappings::FileEndianess;
 use crate::common::Flusher;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::id_tracker::point_mappings::PointMappings;
-use crate::id_tracker::{DELETED_POINT_VERSION, IdTracker};
+use crate::id_tracker::{DELETED_POINT_VERSION, IdTracker, PointMappingsRefEnum};
 use crate::types::{PointIdType, SeqNumberType};
 
 const FILE_MAPPINGS: &str = "mutable_id_tracker.mappings";
@@ -268,23 +268,8 @@ impl IdTracker for MutableIdTracker {
         Ok(())
     }
 
-    fn iter_external(&self) -> Box<dyn Iterator<Item = PointIdType> + '_> {
-        self.mappings.iter_external()
-    }
-
-    fn iter_internal(&self) -> Box<dyn Iterator<Item = PointOffsetType> + '_> {
-        self.mappings.iter_internal()
-    }
-
-    fn iter_from(
-        &self,
-        external_id: Option<PointIdType>,
-    ) -> Box<dyn Iterator<Item = (PointIdType, PointOffsetType)> + '_> {
-        self.mappings.iter_from(external_id)
-    }
-
-    fn iter_random(&self) -> Box<dyn Iterator<Item = (PointIdType, PointOffsetType)> + '_> {
-        self.mappings.iter_random()
+    fn point_mappings(&self) -> PointMappingsRefEnum<'_> {
+        PointMappingsRefEnum::Plain(&self.mappings)
     }
 
     fn total_point_count(&self) -> usize {
@@ -788,7 +773,8 @@ fn load_versions(versions_path: &Path) -> OperationResult<Vec<SeqNumberType>> {
     let file_len = file.metadata()?.len();
     if file_len % VERSION_ELEMENT_SIZE != 0 {
         log::warn!(
-            "Corrupted ID tracker versions storage, file size not a multiple of a version, assuming automatic recovery by WAL"
+            "Mutable ID tracker versions file has partial trailing entry, ignoring last {} bytes (will be cleaned up on next flush)",
+            file_len % VERSION_ELEMENT_SIZE,
         );
     }
     let version_count = file_len / VERSION_ELEMENT_SIZE;
@@ -816,21 +802,17 @@ fn store_version_changes(
         .truncate(false)
         .open(versions_path)?;
 
-    // Grow file if necessary in one shot
-    // Prevents potentially reallocating the file multiple times when progressively writing changes
-    match file.metadata() {
-        Ok(metadata) => {
-            let (&max_internal_id, _) = changes.last_key_value().unwrap();
-            let required_size = u64::from(max_internal_id + 1) * VERSION_ELEMENT_SIZE;
-            if metadata.len() < required_size {
-                file.set_len(required_size)?;
-            }
-        }
-        Err(err) => {
-            log::warn!(
-                "Failed to get file length of mutable ID tracker versions file, ignoring: {err}"
-            );
-        }
+    // Truncate partial trailing entry if present (e.g. from a previous crash mid-write).
+    // Must be done before writing to prevent zero-fill from merging with partial bytes
+    // into a corrupt-but-complete-looking entry when extending the file.
+    let file_len = file.metadata()?.len();
+    let valid_len = (file_len / VERSION_ELEMENT_SIZE) * VERSION_ELEMENT_SIZE;
+    if file_len != valid_len {
+        log::warn!(
+            "Mutable ID tracker versions file has partial trailing entry ({} extra bytes), truncating",
+            file_len - valid_len,
+        );
+        file.set_len(valid_len)?;
     }
 
     let mut writer = BufWriter::new(file);
@@ -970,12 +952,19 @@ pub(super) mod tests {
         id_tracker.set_link(177.into(), 8).unwrap();
         id_tracker.set_link(118.into(), 9).unwrap();
 
-        let first_four = id_tracker.iter_from(None).take(4).collect_vec();
+        let first_four = id_tracker
+            .point_mappings()
+            .iter_from(None)
+            .take(4)
+            .collect_vec();
 
         assert_eq!(first_four.len(), 4);
         assert_eq!(first_four[0].0, 100.into());
 
-        let last = id_tracker.iter_from(Some(first_four[3].0)).collect_vec();
+        let last = id_tracker
+            .point_mappings()
+            .iter_from(Some(first_four[3].0))
+            .collect_vec();
         assert_eq!(last.len(), 7);
     }
 
@@ -1000,7 +989,11 @@ pub(super) mod tests {
         let segment_dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
         let id_tracker = make_mutable_tracker(segment_dir.path());
 
-        let sorted_from_tracker = id_tracker.iter_from(None).map(|(k, _)| k).collect_vec();
+        let sorted_from_tracker = id_tracker
+            .point_mappings()
+            .iter_from(None)
+            .map(|(k, _)| k)
+            .collect_vec();
 
         let mut values = TEST_POINTS.to_vec();
         values.sort();
@@ -1109,7 +1102,7 @@ pub(super) mod tests {
     fn test_all_points_have_version() {
         let segment_dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
         let id_tracker = make_mutable_tracker(segment_dir.path());
-        for i in id_tracker.iter_internal() {
+        for i in id_tracker.point_mappings().iter_internal() {
             assert!(id_tracker.internal_version(i).is_some());
         }
     }
@@ -1123,15 +1116,26 @@ pub(super) mod tests {
 
         let point_to_delete = PointIdType::NumId(100);
 
-        assert!(id_tracker.iter_external().contains(&point_to_delete));
+        assert!(
+            id_tracker
+                .point_mappings()
+                .iter_external()
+                .contains(&point_to_delete)
+        );
 
         assert_eq!(id_tracker.internal_id(point_to_delete), Some(0));
 
         id_tracker.drop(point_to_delete).unwrap();
 
         let point_exists = id_tracker.internal_id(point_to_delete).is_some()
-            && id_tracker.iter_external().contains(&point_to_delete)
-            && id_tracker.iter_from(None).any(|i| i.0 == point_to_delete);
+            && id_tracker
+                .point_mappings()
+                .iter_external()
+                .contains(&point_to_delete)
+            && id_tracker
+                .point_mappings()
+                .iter_from(None)
+                .any(|i| i.0 == point_to_delete);
 
         assert!(!point_exists);
 
@@ -1486,7 +1490,7 @@ pub(super) mod tests {
         }
 
         fn check_trackers(a: &SimpleIdTracker, b: &MutableIdTracker) {
-            for (external_id, internal_id) in a.iter_from(None) {
+            for (external_id, internal_id) in a.point_mappings().iter_from(None) {
                 assert_eq!(
                     a.internal_version(internal_id).unwrap(),
                     b.internal_version(internal_id).unwrap()
@@ -1499,7 +1503,7 @@ pub(super) mod tests {
                 );
             }
 
-            for (external_id, internal_id) in b.iter_from(None) {
+            for (external_id, internal_id) in b.point_mappings().iter_from(None) {
                 assert_eq!(
                     a.internal_version(internal_id).unwrap(),
                     b.internal_version(internal_id).unwrap()
@@ -1522,5 +1526,91 @@ pub(super) mod tests {
         let mutable_id_tracker = MutableIdTracker::open(segment_dir.path()).unwrap();
 
         check_trackers(&simple_id_tracker, &mutable_id_tracker);
+    }
+
+    /// Loading versions with a partial trailing entry should ignore the incomplete bytes
+    /// without modifying the file (read-only safe).
+    #[test]
+    fn test_load_versions_partial_tail_ignored() {
+        let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+        let path = versions_path(dir.path());
+
+        // Write 3 complete u64 entries (24 bytes) + 5 garbage bytes = 29 bytes
+        let mut data = Vec::new();
+        for v in [10u64, 20, 30] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        data.extend_from_slice(&[0xFF; 5]);
+        fs::write(&path, &data).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 29);
+
+        let versions = load_versions(&path).unwrap();
+        assert_eq!(versions, vec![10, 20, 30]);
+
+        // File must NOT be truncated by load (read-only operation)
+        assert_eq!(fs::metadata(&path).unwrap().len(), 29);
+    }
+
+    /// Writing versions should truncate a partial trailing entry left from a previous crash,
+    /// then correctly write the new versions.
+    #[test]
+    fn test_store_versions_truncates_partial_tail() {
+        let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+        let path = versions_path(dir.path());
+
+        // Write 2 complete entries + 3 garbage bytes
+        let mut data = Vec::new();
+        for v in [10u64, 20] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        data.extend_from_slice(&[0xFF; 3]);
+        fs::write(&path, &data).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 19);
+
+        // Store a version change for internal_id=1
+        let mut changes = BTreeMap::new();
+        changes.insert(1u32, 99u64);
+        store_version_changes(&path, &changes).unwrap();
+
+        // File should be aligned and contain correct data
+        let file_len = fs::metadata(&path).unwrap().len();
+        assert_eq!(file_len % VERSION_ELEMENT_SIZE, 0);
+
+        let versions = load_versions(&path).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0], 10); // untouched
+        assert_eq!(versions[1], 99); // updated
+    }
+
+    /// Writing versions past the current file end should extend the file via seek+write,
+    /// with zero-filled gaps (version 0 = DELETED_POINT_VERSION).
+    #[test]
+    fn test_store_versions_extends_without_set_len() {
+        let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+        let path = versions_path(dir.path());
+
+        // Write 2 initial entries
+        let mut changes = BTreeMap::new();
+        changes.insert(0u32, 100u64);
+        changes.insert(1u32, 200u64);
+        store_version_changes(&path, &changes).unwrap();
+
+        let versions = load_versions(&path).unwrap();
+        assert_eq!(versions, vec![100, 200]);
+
+        // Now write at internal_id=5, leaving a gap at 2,3,4
+        let mut changes = BTreeMap::new();
+        changes.insert(5u32, 500u64);
+        store_version_changes(&path, &changes).unwrap();
+
+        let versions = load_versions(&path).unwrap();
+        assert_eq!(versions.len(), 6);
+        assert_eq!(versions[0], 100);
+        assert_eq!(versions[1], 200);
+        // Gap entries should be zero-filled (DELETED_POINT_VERSION)
+        assert_eq!(versions[2], 0);
+        assert_eq!(versions[3], 0);
+        assert_eq!(versions[4], 0);
+        assert_eq!(versions[5], 500);
     }
 }

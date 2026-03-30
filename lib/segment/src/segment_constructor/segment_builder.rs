@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -31,7 +32,7 @@ use super::{
 };
 use crate::common::error_logging::LogError;
 use crate::common::operation_error::{OperationError, OperationResult, check_process_stopped};
-use crate::entry::entry_point::NonAppendableSegmentEntry;
+use crate::entry::ReadSegmentEntry;
 use crate::id_tracker::compressed::compressed_point_mappings::CompressedPointMappings;
 use crate::id_tracker::immutable_id_tracker::ImmutableIdTracker;
 use crate::id_tracker::in_memory_id_tracker::InMemoryIdTracker;
@@ -252,7 +253,7 @@ impl SegmentBuilder {
                 }
                 FieldIndex::UuidMapIndex(index) => {
                     if let Some(ids) = index.get_values(internal_id) {
-                        uuid_hash(&mut ordering, ids.copied());
+                        uuid_hash(&mut ordering, ids.map(Cow::into_owned));
                     }
                     break;
                 }
@@ -461,12 +462,13 @@ impl SegmentBuilder {
     /// Test wrapper for [`SegmentBuilder::build`].
     #[cfg(feature = "testing")]
     pub fn build_for_test(self, segments_path: &Path) -> Segment {
-        use crate::index::hnsw_index::num_rayon_threads;
+        use crate::index::hnsw_index::get_num_indexing_threads;
 
         self.build(
             segments_path,
             Uuid::new_v4(),
-            ResourcePermit::dummy(num_rayon_threads(0) as u32),
+            None,
+            ResourcePermit::dummy(get_num_indexing_threads(0) as u32),
             &AtomicBool::new(false),
             &mut rand::rng(),
             &HardwareCounterCell::new(),
@@ -480,6 +482,7 @@ impl SegmentBuilder {
         self,
         segments_path: &Path,
         segment_uuid: Uuid,
+        deferred_internal_id: Option<PointOffsetType>,
         permit: ResourcePermit,
         stopped: &AtomicBool,
         rng: &mut R,
@@ -672,6 +675,8 @@ impl SegmentBuilder {
                     path: &vector_index_path,
                     stopped,
                     tick_progress: || (),
+                    // We don't use the `index` returned here so we always set deferred to `None`. It's been loaded properly later.
+                    deferred_internal_id: None,
                 })?;
 
                 if sparse_vector_config.storage_type.is_on_disk() {
@@ -683,6 +688,9 @@ impl SegmentBuilder {
                 if sparse_vector_config.index.index_type.is_on_disk() {
                     index.clear_cache()?;
                 }
+
+                // Ensure we don't use the sparse vector index in future because it's missing proper setup of deferred points.
+                drop(index);
             }
             drop(progress_sparse_vector_index);
 
@@ -723,7 +731,13 @@ impl SegmentBuilder {
         let destination_path = segments_path.join(segment_uuid.to_string());
         fs::rename(temp_dir.keep(), &destination_path)
             .describe("Moving segment data after optimization")?;
-        load_segment(&destination_path, segment_uuid, stopped)
+
+        load_segment(
+            &destination_path,
+            segment_uuid,
+            deferred_internal_id,
+            stopped,
+        )
     }
 
     fn update_quantization(

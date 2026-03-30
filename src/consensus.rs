@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{cmp, fmt, thread};
+use std::{cmp, thread};
 
 use anyhow::{Context as _, anyhow};
 use api::grpc::dynamic_channel_pool::make_grpc_channel;
@@ -226,7 +226,7 @@ impl Consensus {
                 &runtime,
                 leader_established_in_ms,
             )
-            .map_err(|err| anyhow!("Failed to initialize Consensus for new Raft state: {err}"))?;
+            .context("Failed to initialize Consensus for new Raft state")?;
         } else {
             runtime
                 .block_on(Self::recover(
@@ -236,9 +236,7 @@ impl Consensus {
                     &config,
                     tls_config.clone(),
                 ))
-                .map_err(|err| {
-                    anyhow!("Failed to recover Consensus from existing Raft state: {err}")
-                })?;
+                .context("Failed to recover Consensus from existing Raft state")?;
 
             if bootstrap_peer.is_some() || uri.is_some() {
                 log::debug!("Local raft state found - bootstrap and uri cli arguments were ignored")
@@ -341,7 +339,7 @@ impl Consensus {
             tls_config,
         )
         .await
-        .map_err(|err| anyhow!("Failed to create timeout channel: {err}"))?;
+        .context("Failed to create timeout channel")?;
         let mut client = RaftClient::new(channel);
         let all_peers = client
             .add_peer_to_known(tonic::Request::new(
@@ -352,7 +350,7 @@ impl Consensus {
                 },
             ))
             .await
-            .map_err(|err| anyhow!("Failed to add peer to known: {err}"))?
+            .context("Failed to add peer to known")?
             .into_inner();
         Ok(all_peers)
     }
@@ -455,7 +453,7 @@ impl Consensus {
                         .parse()
                         .context(format!("Failed to parse peer URI: {}", peer.uri))?,
                 )
-                .map_err(|err| anyhow!("Failed to add peer: {err}"))?
+                .context("Failed to add peer")?
         }
         // Only first peer has itself as a voter in the initial conf state.
         // This needs to be propagated manually to other peers as it is not contained in any log entry.
@@ -727,7 +725,7 @@ impl Consensus {
     }
 
     fn is_leader(&self) -> bool {
-        self.node.status().ss.raft_state == raft::StateRole::Leader
+        self.node.status().ss.raft_state == StateRole::Leader
     }
 
     fn try_sync_local_state(&self) -> anyhow::Result<()> {
@@ -775,7 +773,7 @@ impl Consensus {
         // If we reached this point, we are the origin peer, but it's impossible to propose anything
         // to consensus, before leader is elected (`propose_conf_change` will return an error),
         // so we have to wait for a few ticks for self-election
-        if status.ss.raft_state != StateRole::Leader {
+        if !self.is_leader() {
             return Err(TryAddOriginError::NotLeader);
         }
 
@@ -810,7 +808,7 @@ impl Consensus {
     /// that guarantees that learner will start voting only after it applies all the changes in the log
     fn try_promote_learner(&mut self) -> anyhow::Result<bool> {
         // Promote only if leader
-        if self.node.status().ss.raft_state != StateRole::Leader {
+        if !self.is_leader() {
             return Ok(false);
         }
 
@@ -946,7 +944,7 @@ impl Consensus {
 
             store
                 .append_entries(ready.take_entries())
-                .map_err(|err| anyhow!("Failed to append entries: {err}"))?
+                .context("Failed to append entries")?
         }
 
         if let Some(hs) = ready.hs() {
@@ -956,7 +954,7 @@ impl Consensus {
 
             store
                 .set_hard_state(hs.clone())
-                .map_err(|err| anyhow!("Failed to set hard state: {err}"))?
+                .context("Failed to set hard state")?
         }
 
         let role_change = ready.ss().map(|ss| ss.raft_state);
@@ -1019,7 +1017,7 @@ impl Consensus {
 
             store
                 .set_commit_index(commit)
-                .map_err(|err| anyhow!("Failed to set commit index: {err}"))?;
+                .context("Failed to set commit index")?;
         }
 
         self.send_messages(light_rd.take_messages());
@@ -1144,14 +1142,16 @@ impl RaftMessageBroker {
             let failed_to_forward = |message: &RaftMessage, description: &str| {
                 let peer_id = message.to;
 
-                let is_debug = log::max_level() >= log::Level::Debug;
-                let space = if is_debug { " " } else { "" };
-                let message: &dyn fmt::Debug = if is_debug { &message } else { &"" }; // TODO: `fmt::Debug` for `""` prints `""`... 😒
-
-                log::error!(
-                    "Failed to forward message{space}{message:?} to message sender task {peer_id}: \
-                     {description}"
-                );
+                if log::max_level() >= log::Level::Debug {
+                    log::error!(
+                        "Failed to forward message {message:?} to message sender task {peer_id}: \
+                         {description}"
+                    );
+                } else {
+                    log::error!(
+                        "Failed to forward message to message sender task {peer_id}: {description}"
+                    );
+                }
             };
 
             match sender.send(message).map_err(|err| *err) {
@@ -1416,7 +1416,7 @@ impl RaftMessageSender {
             self.tls_config.clone(),
         )
         .await
-        .map_err(|err| anyhow::format_err!("Failed to create who-is channel: {err}"))?;
+        .context("Failed to create who-is channel")?;
 
         let uri = RaftClient::new(channel)
             .who_is(tonic::Request::new(GrpcPeerId { id: peer_id }))
@@ -1452,7 +1452,7 @@ mod tests {
     use storage::content_manager::consensus_manager::{ConsensusManager, ConsensusStateRef};
     use storage::content_manager::toc::TableOfContent;
     use storage::dispatcher::Dispatcher;
-    use storage::rbac::{Access, Auth, AuthType};
+    use storage::rbac::{Access, Auth};
     use tempfile::Builder;
 
     use super::Consensus;
@@ -1576,7 +1576,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
-                    Auth::new(Access::full("For test"), None, None, AuthType::Internal),
+                    Auth::new_internal(Access::full("For test")),
                     None,
                 ),
             )

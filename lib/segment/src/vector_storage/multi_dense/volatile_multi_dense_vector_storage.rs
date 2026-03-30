@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
-use bitvec::prelude::{BitSlice, BitVec};
+use common::bitvec::{BitSlice, BitSliceExt as _, BitVec, bitvec_set_deleted};
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::ext::BitSliceExt as _;
+use common::generic_consts::AccessPattern;
 use common::types::PointOffsetType;
 
 use crate::common::Flusher;
@@ -13,11 +14,10 @@ use crate::data_types::named_vectors::{CowMultiVector, CowVector};
 use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{TypedMultiDenseVectorRef, VectorElementType, VectorRef};
 use crate::types::{Distance, MultiVectorConfig, VectorStorageDatatype};
-use crate::vector_storage::bitvec::bitvec_set_deleted;
-use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::common::CHUNK_SIZE;
+use crate::vector_storage::volatile_chunked_vectors::VolatileChunkedVectors;
 use crate::vector_storage::{
-    AccessPattern, MultiVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    MultiVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 /// All fields are counting vectors and not dimensions.
@@ -35,7 +35,7 @@ pub struct VolatileMultiDenseVectorStorage<T: PrimitiveVectorElement> {
     distance: Distance,
     multi_vector_config: MultiVectorConfig,
     /// Keep vectors in memory
-    vectors: ChunkedVectors<T>,
+    vectors: VolatileChunkedVectors<T>,
     vectors_metadata: Vec<MultiVectorMetadata>,
     /// BitVec for deleted flags. Grows dynamically upto last set flag.
     deleted: BitVec,
@@ -100,7 +100,7 @@ impl<T: PrimitiveVectorElement> VolatileMultiDenseVectorStorage<T> {
             dim,
             distance,
             multi_vector_config,
-            vectors: ChunkedVectors::new(dim),
+            vectors: VolatileChunkedVectors::new(dim),
             vectors_metadata: vec![],
             deleted: BitVec::new(),
             deleted_count: 0,
@@ -182,7 +182,7 @@ impl<T: PrimitiveVectorElement> MultiVectorStorage<T> for VolatileMultiDenseVect
     }
 
     /// Panics if key is out of bounds
-    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> TypedMultiDenseVectorRef<'_, T> {
+    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> CowMultiVector<'_, T> {
         self.get_multi_opt::<P>(key).expect("vector not found")
     }
 
@@ -190,24 +190,25 @@ impl<T: PrimitiveVectorElement> MultiVectorStorage<T> for VolatileMultiDenseVect
     fn get_multi_opt<P: AccessPattern>(
         &self,
         key: PointOffsetType,
-    ) -> Option<TypedMultiDenseVectorRef<'_, T>> {
+    ) -> Option<CowMultiVector<'_, T>> {
         // No sequential optimizations available for in memory storage.
         self.vectors_metadata.get(key as usize).map(|metadata| {
             let flattened_vectors = self
                 .vectors
                 .get_many(metadata.start, metadata.inner_vectors_count)
                 .unwrap_or_else(|| panic!("Vectors does not contain data for {metadata:?}"));
-            TypedMultiDenseVectorRef {
+            CowMultiVector::Borrowed(TypedMultiDenseVectorRef {
                 flattened_vectors,
                 dim: self.dim,
-            }
+            })
         })
     }
 
-    fn iterate_inner_vectors(&self) -> impl Iterator<Item = &[T]> + Clone + Send {
+    fn iterate_inner_vectors(&self) -> impl Iterator<Item = Cow<'_, [T]>> + Clone + Send {
         (0..self.total_vector_count()).flat_map(|key| {
             let metadata = &self.vectors_metadata[key];
-            (0..metadata.inner_vectors_count).map(|i| self.vectors.get(metadata.start + i))
+            (0..metadata.inner_vectors_count)
+                .map(|i| Cow::Borrowed(self.vectors.get(metadata.start + i)))
         })
     }
 
@@ -249,9 +250,7 @@ impl<T: PrimitiveVectorElement> VectorStorage for VolatileMultiDenseVectorStorag
 
     fn get_vector_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<CowVector<'_>> {
         self.get_multi_opt::<P>(key).map(|multi_dense_vector| {
-            CowVector::MultiDense(T::into_float_multivector(CowMultiVector::Borrowed(
-                multi_dense_vector,
-            )))
+            CowVector::MultiDense(T::into_float_multivector(multi_dense_vector))
         })
     }
 

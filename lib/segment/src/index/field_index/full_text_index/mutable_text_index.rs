@@ -282,7 +282,7 @@ impl MutableFullTextIndex {
             }
             Storage::Gridstore(store) => {
                 if self.inverted_index.remove(id) {
-                    store.delete_value(id);
+                    store.delete_value(id)?;
                 }
             }
         }
@@ -293,6 +293,7 @@ impl MutableFullTextIndex {
     /// Get the tokenized document stored for a given point ID. Only for testing purposes.
     #[cfg(test)]
     pub fn get_doc(&self, idx: PointOffsetType) -> Option<Vec<String>> {
+        use common::generic_consts::Random;
         match &self.storage {
             #[cfg(feature = "rocksdb")]
             Storage::RocksDb(db) => {
@@ -303,7 +304,8 @@ impl MutableFullTextIndex {
                 .unwrap()
             }
             Storage::Gridstore(gridstore) => gridstore
-                .get_value::<false>(idx, &HardwareCounterCell::disposable())
+                .get_value::<Random>(idx, &HardwareCounterCell::disposable())
+                .unwrap()
                 .map(|bytes| FullTextIndex::deserialize_document(&bytes).unwrap()),
         }
     }
@@ -422,6 +424,7 @@ mod tests {
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
                 .unwrap()
+                .unwrap()
                 .collect();
             assert_eq!(search_res, vec![0, 4]);
 
@@ -429,12 +432,14 @@ mod tests {
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
                 .unwrap()
+                .unwrap()
                 .collect();
             assert_eq!(search_res, vec![2]);
 
             let filter_condition = filter_request("the great time");
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
+                .unwrap()
                 .unwrap()
                 .collect();
             assert_eq!(search_res, vec![4]);
@@ -446,6 +451,7 @@ mod tests {
             assert!(
                 index
                     .filter(&filter_condition, &hw_counter)
+                    .unwrap()
                     .unwrap()
                     .next()
                     .is_none()
@@ -484,12 +490,14 @@ mod tests {
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
                 .unwrap()
+                .unwrap()
                 .collect();
             assert_eq!(search_res, vec![0]);
 
             let filter_condition = filter_request("the");
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
+                .unwrap()
                 .unwrap()
                 .collect();
             assert_eq!(search_res, vec![0, 1, 3, 4]);
@@ -500,6 +508,7 @@ mod tests {
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
                 .unwrap()
+                .unwrap()
                 .collect();
             assert!(search_res.is_empty());
             assert_eq!(index.count_indexed_points(), 3);
@@ -508,6 +517,7 @@ mod tests {
             let filter_condition = filter_request("the");
             let search_res: Vec<_> = index
                 .filter(&filter_condition, &hw_counter)
+                .unwrap()
                 .unwrap()
                 .collect();
             assert_eq!(search_res, vec![1, 4]);

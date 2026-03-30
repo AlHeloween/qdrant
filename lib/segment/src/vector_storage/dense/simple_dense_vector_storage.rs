@@ -4,9 +4,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use bitvec::prelude::{BitSlice, BitVec};
+use common::bitvec::{BitSlice, BitSliceExt as _, BitVec, bitvec_set_deleted};
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::ext::BitSliceExt as _;
+use common::generic_consts::AccessPattern;
 use common::types::PointOffsetType;
 use log::debug;
 use parking_lot::RwLock;
@@ -19,11 +19,10 @@ use crate::data_types::named_vectors::CowVector;
 use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{VectorElementType, VectorRef};
 use crate::types::{Distance, VectorStorageDatatype};
-use crate::vector_storage::bitvec::bitvec_set_deleted;
-use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::common::StoredRecord;
+use crate::vector_storage::volatile_chunked_vectors::VolatileChunkedVectors;
 use crate::vector_storage::{
-    AccessPattern, DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
+    DenseVectorStorage, VectorOffsetType, VectorStorage, VectorStorageEnum,
 };
 
 type StoredDenseVector<T> = StoredRecord<Vec<T>>;
@@ -33,7 +32,7 @@ type StoredDenseVector<T> = StoredRecord<Vec<T>>;
 pub struct SimpleDenseVectorStorage<T: PrimitiveVectorElement> {
     dim: usize,
     distance: Distance,
-    vectors: ChunkedVectors<T>,
+    vectors: VolatileChunkedVectors<T>,
     db_wrapper: DatabaseColumnWrapper,
     update_buffer: StoredDenseVector<T>,
     /// BitVec for deleted flags. Grows dynamically upto last set flag.
@@ -49,7 +48,7 @@ fn open_simple_dense_vector_storage_impl<T: PrimitiveVectorElement>(
     distance: Distance,
     stopped: &AtomicBool,
 ) -> OperationResult<SimpleDenseVectorStorage<T>> {
-    let mut vectors = ChunkedVectors::new(dim);
+    let mut vectors = VolatileChunkedVectors::new(dim);
     let (mut deleted, mut deleted_count) = (BitVec::new(), 0);
 
     let db_wrapper = DatabaseColumnWrapper::new(database, database_column_name);
@@ -234,8 +233,8 @@ impl<T: PrimitiveVectorElement> DenseVectorStorage<T> for SimpleDenseVectorStora
         self.dim
     }
 
-    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> &[T] {
-        self.vectors.get(key as VectorOffsetType)
+    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> Cow<'_, [T]> {
+        Cow::Borrowed(self.vectors.get(key as VectorOffsetType))
     }
 }
 
@@ -339,14 +338,14 @@ impl<T: PrimitiveVectorElement> VectorStorage for SimpleDenseVectorStorage<T> {
 
 #[cfg(test)]
 mod tests {
+    use common::generic_consts::Sequential;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use tempfile::Builder;
 
     use super::*;
     use crate::common::rocksdb_wrapper::{DB_VECTOR_CF, open_db};
     use crate::segment_constructor::migrate_rocksdb_dense_vector_storage_to_mmap;
-    use crate::vector_storage::Sequential;
 
     const RAND_SEED: u64 = 42;
 

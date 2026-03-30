@@ -2,10 +2,12 @@ use std::cmp;
 use std::sync::{Arc, LazyLock};
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
+use common::types::DeferredBehavior;
 use futures::{TryStreamExt as _, future};
 use segment::types::{Payload, QuantizationConfig, StrictModeConfig};
 use semver::Version;
 use shard::count::CountRequestInternal;
+use shard::operations::optimization::{OptimizationsRequestOptions, OptimizationsResponse};
 
 use super::Collection;
 use crate::operations::config_diff::*;
@@ -354,11 +356,23 @@ impl Collection {
             info.points_count = info.points_count.zip(points_count).map(|(a, b)| a + b);
             info.segments_count += segments_count;
             info.warnings.extend(warnings);
-            if let Some(queue) = &mut info.update_queue {
-                queue.length += update_queue.map(|q| q.length).unwrap_or(0);
+
+            if let Some(UpdateQueueInfo {
+                length,
+                deferred_points,
+            }) = &mut info.update_queue
+            {
+                *length += update_queue.as_ref().map(|q| q.length).unwrap_or(0);
+
+                if let Some(response_deferred_count) = update_queue.and_then(|i| i.deferred_points)
+                    && response_deferred_count > 0
+                {
+                    *deferred_points.get_or_insert_default() += response_deferred_count;
+                }
             } else {
                 info.update_queue = update_queue;
             }
+
             for (key, response_schema) in payload_schema {
                 info.payload_schema
                     .entry(key)
@@ -395,7 +409,12 @@ impl Collection {
                 // So that we can monitor hardware usage without interference
                 let hw_acc = HwMeasurementAcc::disposable();
                 let count_result = replica_set
-                    .count_local(count_request.clone(), None, hw_acc)
+                    .count_local(
+                        count_request.clone(),
+                        None,
+                        hw_acc,
+                        DeferredBehavior::Exclude,
+                    )
                     .await
                     .unwrap_or_default();
 

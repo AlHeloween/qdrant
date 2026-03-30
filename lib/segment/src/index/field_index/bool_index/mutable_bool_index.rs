@@ -213,12 +213,33 @@ impl MutableBoolIndex {
         .flatten()
     }
 
-    pub fn iter_counts_per_value(&self) -> impl Iterator<Item = (bool, usize)> + '_ {
-        [
-            (false, self.storage.falses_flags.count_trues()),
-            (true, self.storage.trues_flags.count_trues()),
-        ]
-        .into_iter()
+    pub fn iter_counts_per_value(
+        &self,
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> impl Iterator<Item = (bool, usize)> + '_ {
+        let (false_count, true_count) = match deferred_internal_id {
+            Some(deferred_internal_id) => {
+                let false_count =
+                    self.storage
+                        .falses_flags
+                        .get_bitmap()
+                        .range_cardinality(..deferred_internal_id) as usize;
+
+                let true_count =
+                    self.storage
+                        .trues_flags
+                        .get_bitmap()
+                        .range_cardinality(..deferred_internal_id) as usize;
+
+                (false_count, true_count)
+            }
+            None => (
+                self.storage.falses_flags.count_trues(),
+                self.storage.trues_flags.count_trues(),
+            ),
+        };
+
+        [(false, false_count), (true, true_count)].into_iter()
     }
 
     pub(crate) fn get_point_values(&self, point_id: u32) -> Vec<bool> {
@@ -355,8 +376,8 @@ impl PayloadFieldIndex for MutableBoolIndex {
         &'a self,
         condition: &'a FieldCondition,
         hw_counter: &'a HardwareCounterCell,
-    ) -> Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>> {
-        match &condition.r#match {
+    ) -> OperationResult<Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>>> {
+        Ok(match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
             })) => {
@@ -372,15 +393,15 @@ impl PayloadFieldIndex for MutableBoolIndex {
                 Some(Box::new(iter))
             }
             _ => None,
-        }
+        })
     }
 
     fn estimate_cardinality(
         &self,
         condition: &FieldCondition,
         hw_counter: &HardwareCounterCell,
-    ) -> Option<CardinalityEstimation> {
-        match &condition.r#match {
+    ) -> OperationResult<Option<CardinalityEstimation>> {
+        Ok(match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
             })) => {
@@ -396,17 +417,17 @@ impl PayloadFieldIndex for MutableBoolIndex {
                 Some(estimation)
             }
             _ => None,
-        }
+        })
     }
 
     fn payload_blocks(
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         let make_block = |count, value, key: PayloadKeyType| {
             if count > threshold {
-                Some(PayloadBlockCondition {
+                Some(Ok(PayloadBlockCondition {
                     condition: FieldCondition::new_match(
                         key,
                         Match::Value(MatchValue {
@@ -414,7 +435,7 @@ impl PayloadFieldIndex for MutableBoolIndex {
                         }),
                     ),
                     cardinality: count,
-                })
+                }))
             } else {
                 None
             }

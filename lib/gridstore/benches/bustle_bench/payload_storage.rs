@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bustle::Collection;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::generic_consts::Random;
 use gridstore::fixtures::{Payload, empty_storage};
 use parking_lot::RwLock;
 
@@ -31,7 +32,8 @@ impl Collection for ArcStorage<PayloadStorage> {
 
 impl SequentialCollectionHandle for PayloadStorage {
     fn get(&self, key: &u32) -> bool {
-        self.get_value::<false>(*key, &HardwareCounterCell::new()) // No measurements needed in benches
+        self.get_value::<Random>(*key, &HardwareCounterCell::new()) // No measurements needed in benches
+            .unwrap()
             .is_some()
     }
 
@@ -46,7 +48,7 @@ impl SequentialCollectionHandle for PayloadStorage {
     }
 
     fn remove(&mut self, key: &u32) -> bool {
-        self.delete_value(*key).is_some()
+        self.delete_value(*key).unwrap().is_some()
     }
 
     fn update(&mut self, key: &u32, payload: &Payload) -> bool {

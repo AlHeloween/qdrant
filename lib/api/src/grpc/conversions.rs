@@ -1013,13 +1013,13 @@ impl TryFrom<rest::Record> for RetrievedPoint {
 
 impl From<segment::data_types::order_by::OrderValue> for OrderValue {
     fn from(value: segment::data_types::order_by::OrderValue) -> Self {
-        use segment::data_types::order_by as segment;
+        use segment::data_types::order_by as segment_;
 
         use crate::grpc::qdrant::order_value::Variant;
 
         let variant = match value {
-            segment::OrderValue::Float(value) => Variant::Float(value),
-            segment::OrderValue::Int(value) => Variant::Int(value),
+            segment_::OrderValue::Float(value) => Variant::Float(value),
+            segment_::OrderValue::Int(value) => Variant::Int(value),
         };
 
         Self {
@@ -1032,7 +1032,7 @@ impl TryFrom<OrderValue> for segment::data_types::order_by::OrderValue {
     type Error = Status;
 
     fn try_from(value: OrderValue) -> Result<Self, Self::Error> {
-        use segment::data_types::order_by as segment;
+        use segment::data_types::order_by as segment_;
 
         use crate::grpc::qdrant::order_value::Variant;
 
@@ -1043,8 +1043,8 @@ impl TryFrom<OrderValue> for segment::data_types::order_by::OrderValue {
         })?;
 
         let value = match variant {
-            Variant::Float(value) => segment::OrderValue::Float(value),
-            Variant::Int(value) => segment::OrderValue::Int(value),
+            Variant::Float(value) => segment_::OrderValue::Float(value),
+            Variant::Int(value) => segment_::OrderValue::Int(value),
         };
 
         Ok(value)
@@ -2296,6 +2296,7 @@ impl From<StrictModeConfig> for segment::types::StrictModeConfig {
             search_allow_exact,
             search_max_oversampling,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -2317,6 +2318,7 @@ impl From<StrictModeConfig> for segment::types::StrictModeConfig {
             search_allow_exact,
             search_max_oversampling: search_max_oversampling.map(f64::from),
             upsert_max_batchsize: upsert_max_batchsize.map(|i| i as usize),
+            search_max_batchsize: search_max_batchsize.map(|i| i as usize),
             max_collection_vector_size_bytes: max_collection_vector_size_bytes.map(|i| i as usize),
             read_rate_limit: read_rate_limit.map(|i| i as usize),
             write_rate_limit: write_rate_limit.map(|i| i as usize),
@@ -2421,6 +2423,7 @@ impl From<segment::types::StrictModeConfigOutput> for StrictModeConfig {
             search_allow_exact,
             search_max_oversampling,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -2442,6 +2445,7 @@ impl From<segment::types::StrictModeConfigOutput> for StrictModeConfig {
             search_allow_exact,
             search_max_oversampling: search_max_oversampling.map(|i| i as f32),
             upsert_max_batchsize: upsert_max_batchsize.map(|i| i as u64),
+            search_max_batchsize: search_max_batchsize.map(|i| i as u64),
             max_collection_vector_size_bytes: max_collection_vector_size_bytes.map(|i| i as u64),
             read_rate_limit: read_rate_limit.map(|i| i as u32),
             write_rate_limit: write_rate_limit.map(|i| i as u32),
@@ -2468,6 +2472,7 @@ impl From<StrictModeConfig> for segment::types::StrictModeConfigOutput {
             search_allow_exact,
             search_max_oversampling,
             upsert_max_batchsize,
+            search_max_batchsize,
             max_collection_vector_size_bytes,
             read_rate_limit,
             write_rate_limit,
@@ -2489,6 +2494,7 @@ impl From<StrictModeConfig> for segment::types::StrictModeConfigOutput {
             search_allow_exact,
             search_max_oversampling: search_max_oversampling.map(f64::from),
             upsert_max_batchsize: upsert_max_batchsize.map(|i| i as usize),
+            search_max_batchsize: search_max_batchsize.map(|i| i as usize),
             max_collection_vector_size_bytes: max_collection_vector_size_bytes.map(|i| i as usize),
             read_rate_limit: read_rate_limit.map(|i| i as usize),
             write_rate_limit: write_rate_limit.map(|i| i as usize),
@@ -2875,9 +2881,9 @@ impl TryFrom<raw_query::Context> for segment_query::ContextQuery<segment_vectors
     }
 }
 
-impl From<segment_query::DiscoveryQuery<segment_vectors::VectorInternal>> for raw_query::Discovery {
-    fn from(value: segment_query::DiscoveryQuery<segment_vectors::VectorInternal>) -> Self {
-        let segment_query::DiscoveryQuery { target, pairs } = value;
+impl From<segment_query::DiscoverQuery<segment_vectors::VectorInternal>> for raw_query::Discovery {
+    fn from(value: segment_query::DiscoverQuery<segment_vectors::VectorInternal>) -> Self {
+        let segment_query::DiscoverQuery { target, pairs } = value;
         Self {
             target: Some(RawVector::from(target)),
             context: pairs
@@ -2889,7 +2895,7 @@ impl From<segment_query::DiscoveryQuery<segment_vectors::VectorInternal>> for ra
 }
 
 impl TryFrom<raw_query::Discovery>
-    for segment_query::DiscoveryQuery<segment_vectors::VectorInternal>
+    for segment_query::DiscoverQuery<segment_vectors::VectorInternal>
 {
     type Error = Status;
     fn try_from(value: raw_query::Discovery) -> Result<Self, Self::Error> {
@@ -3234,14 +3240,24 @@ impl From<rest::SearchMatrixPair> for SearchMatrixPair {
 
 impl From<HwMeasurementAcc> for HardwareUsage {
     fn from(value: HwMeasurementAcc) -> Self {
+        let HardwareData {
+            cpu,
+            payload_io_read,
+            payload_io_write,
+            payload_index_io_read,
+            payload_index_io_write,
+            vector_io_read,
+            vector_io_write,
+        } = value.hw_data();
+
         Self {
-            cpu: value.get_cpu() as u64,
-            payload_io_read: value.get_payload_io_read() as u64,
-            payload_io_write: value.get_payload_io_write() as u64,
-            payload_index_io_read: value.get_payload_index_io_read() as u64,
-            payload_index_io_write: value.get_payload_index_io_write() as u64,
-            vector_io_read: value.get_vector_io_read() as u64,
-            vector_io_write: value.get_vector_io_write() as u64,
+            cpu: cpu as u64,
+            payload_io_read: payload_io_read as u64,
+            payload_io_write: payload_io_write as u64,
+            payload_index_io_read: payload_index_io_read as u64,
+            payload_index_io_write: payload_index_io_write as u64,
+            vector_io_read: vector_io_read as u64,
+            vector_io_write: vector_io_write as u64,
         }
     }
 }

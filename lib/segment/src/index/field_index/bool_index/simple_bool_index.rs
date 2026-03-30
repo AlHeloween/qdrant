@@ -21,8 +21,7 @@ use crate::telemetry::PayloadIndexTelemetry;
 use crate::types::{FieldCondition, Match, MatchValue, PayloadKeyType, ValueVariants};
 
 mod memory {
-    use bitvec::vec::BitVec;
-    use common::ext::BitSliceExt as _;
+    use common::bitvec::{BitSliceExt as _, BitVec};
     use common::types::PointOffsetType;
 
     pub struct BooleanItem {
@@ -353,8 +352,8 @@ impl PayloadFieldIndex for SimpleBoolIndex {
         &'a self,
         condition: &'a crate::types::FieldCondition,
         _: &'a HardwareCounterCell,
-    ) -> Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>> {
-        match &condition.r#match {
+    ) -> OperationResult<Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>>> {
+        Ok(match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
             })) => {
@@ -365,15 +364,15 @@ impl PayloadFieldIndex for SimpleBoolIndex {
                 }
             }
             _ => None,
-        }
+        })
     }
 
     fn estimate_cardinality(
         &self,
         condition: &FieldCondition,
         _: &HardwareCounterCell,
-    ) -> Option<CardinalityEstimation> {
-        match &condition.r#match {
+    ) -> OperationResult<Option<CardinalityEstimation>> {
+        Ok(match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
             })) => {
@@ -389,17 +388,17 @@ impl PayloadFieldIndex for SimpleBoolIndex {
                 Some(estimation)
             }
             _ => None,
-        }
+        })
     }
 
     fn payload_blocks(
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         let make_block = |count, value, key: PayloadKeyType| {
             if count > threshold {
-                Some(PayloadBlockCondition {
+                Some(Ok(PayloadBlockCondition {
                     condition: FieldCondition::new_match(
                         key,
                         Match::Value(MatchValue {
@@ -407,7 +406,7 @@ impl PayloadFieldIndex for SimpleBoolIndex {
                         }),
                     ),
                     cardinality: count,
-                })
+                }))
             } else {
                 None
             }

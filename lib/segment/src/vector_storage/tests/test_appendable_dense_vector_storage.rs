@@ -1,8 +1,7 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use atomic_refcell::AtomicRefCell;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::generic_consts::Random;
 use common::mmap::AdviceSetting;
 use common::types::PointOffsetType;
 use itertools::Itertools;
@@ -11,8 +10,8 @@ use tempfile::Builder;
 #[cfg(feature = "rocksdb")]
 use crate::common::rocksdb_wrapper::{DB_VECTOR_CF, open_db};
 use crate::data_types::vectors::QueryVector;
-use crate::fixtures::payload_context_fixture::FixtureIdTracker;
-use crate::id_tracker::IdTrackerSS;
+use crate::fixtures::payload_context_fixture::create_id_tracker_fixture;
+use crate::id_tracker::IdTracker;
 use crate::index::hnsw_index::point_scorer::{BatchFilteredSearcher, FilteredScorer};
 use crate::types::{Distance, PointIdType, QuantizationConfig, ScalarQuantizationConfig};
 use crate::vector_storage::dense::appendable_dense_vector_storage::open_appendable_memmap_vector_storage_full;
@@ -22,9 +21,7 @@ use crate::vector_storage::dense::volatile_dense_vector_storage::new_volatile_de
 use crate::vector_storage::quantized::quantized_vectors::{
     QuantizedVectors, QuantizedVectorsStorageType,
 };
-use crate::vector_storage::{
-    DEFAULT_STOPPED, Random, VectorStorage, VectorStorageEnum, new_raw_scorer,
-};
+use crate::vector_storage::{DEFAULT_STOPPED, VectorStorage, VectorStorageEnum, new_raw_scorer};
 
 fn do_test_delete_points(storage: &mut VectorStorageEnum) {
     let points = [
@@ -35,10 +32,8 @@ fn do_test_delete_points(storage: &mut VectorStorageEnum) {
         vec![1.0, 0.0, 0.0, 0.0],
     ];
     let delete_mask = [false, false, true, true, false];
-    let id_tracker: Arc<AtomicRefCell<IdTrackerSS>> =
-        Arc::new(AtomicRefCell::new(FixtureIdTracker::new(points.len())));
 
-    let borrowed_id_tracker = id_tracker.borrow_mut();
+    let id_tracker = create_id_tracker_fixture(points.len());
 
     let hw_counter = HardwareCounterCell::new();
 
@@ -67,7 +62,7 @@ fn do_test_delete_points(storage: &mut VectorStorageEnum) {
     let searcher = BatchFilteredSearcher::new_for_test(
         std::slice::from_ref(&query),
         storage,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         5,
     );
     let closest = searcher
@@ -95,7 +90,7 @@ fn do_test_delete_points(storage: &mut VectorStorageEnum) {
     let searcher = BatchFilteredSearcher::new_for_test(
         std::slice::from_ref(&query),
         storage,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         5,
     );
     let closest = searcher
@@ -122,11 +117,11 @@ fn do_test_delete_points(storage: &mut VectorStorageEnum) {
     let searcher = BatchFilteredSearcher::new_for_test(
         std::slice::from_ref(&query),
         storage,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         5,
     );
     let closest = searcher
-        .peek_top_all(&DEFAULT_STOPPED)
+        .peek_top_all(&DEFAULT_STOPPED, None)
         .unwrap()
         .into_iter()
         .exactly_one()
@@ -144,9 +139,7 @@ fn do_test_update_from_delete_points(storage: &mut VectorStorageEnum) {
     ];
     let delete_mask = [false, false, true, true, false];
 
-    let id_tracker: Arc<AtomicRefCell<IdTrackerSS>> =
-        Arc::new(AtomicRefCell::new(FixtureIdTracker::new(points.len())));
-    let borrowed_id_tracker = id_tracker.borrow_mut();
+    let id_tracker = create_id_tracker_fixture(points.len());
 
     let hw_counter = HardwareCounterCell::new();
     {
@@ -182,7 +175,7 @@ fn do_test_update_from_delete_points(storage: &mut VectorStorageEnum) {
     let searcher = BatchFilteredSearcher::new_for_test(
         std::slice::from_ref(&query),
         storage,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         5,
     );
     let closest = searcher
@@ -215,9 +208,7 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
         vec![1.0, 1.0, 0.0, 1.0],
         vec![1.0, 0.0, 0.0, 0.0],
     ];
-    let id_tracker: Arc<AtomicRefCell<IdTrackerSS>> =
-        Arc::new(AtomicRefCell::new(FixtureIdTracker::new(points.len())));
-    let mut borrowed_id_tracker = id_tracker.borrow_mut();
+    let mut id_tracker = create_id_tracker_fixture(points.len());
 
     let hw_counter = HardwareCounterCell::new();
 
@@ -232,7 +223,7 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
     let searcher = BatchFilteredSearcher::new_for_test(
         std::slice::from_ref(&query),
         storage,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         2,
     );
     let closest = searcher
@@ -250,7 +241,7 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
         None => panic!("No close vector found!"),
     };
 
-    borrowed_id_tracker
+    id_tracker
         .drop(PointIdType::NumId(u64::from(top_idx)))
         .unwrap();
 
@@ -259,7 +250,7 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
         storage,
         None,
         None,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         HardwareCounterCell::new(),
     )
     .unwrap();
@@ -270,7 +261,7 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
         None,
         None,
         2,
-        borrowed_id_tracker.deleted_point_bitslice(),
+        id_tracker.deleted_point_bitslice(),
         HardwareCounterCell::new(),
     )
     .unwrap();
@@ -301,8 +292,8 @@ fn do_test_score_points(storage: &mut VectorStorageEnum) {
         None => panic!("No close vector found!"),
     };
 
-    let all_ids1: Vec<_> = borrowed_id_tracker.iter_internal().collect();
-    let all_ids2: Vec<_> = borrowed_id_tracker.iter_internal().collect();
+    let all_ids1: Vec<_> = id_tracker.point_mappings().iter_internal().collect();
+    let all_ids2: Vec<_> = id_tracker.point_mappings().iter_internal().collect();
 
     assert_eq!(all_ids1, all_ids2);
 
